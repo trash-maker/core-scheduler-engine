@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:notification-engine:notification:v1",
+  "title": "Notification (topic notifications.out, key = tenant_id:notification_id, header 'action')",
+  "type": "object",
+  "required": ["schema_version", "notification_id", "attempt", "idempotency_key", "action", "tenant_id", "correlation_key", "body"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "notification_id": {"type": "string", "format": "uuid", "description": "UUIDv7"},
+    "attempt": {"type": "integer", "minimum": 1, "description": "Monotonic per notification; actuators dedupe on notification_id + attempt"},
+    "idempotency_key": {"type": "string", "description": "tenant|rule|correlation_key|edge_seq|template (series: + series/occurrence)"},
+    "action": {"type": "string", "pattern": "^[A-Z0-9_.-]{1,64}$", "description": "Also sent as Kafka header 'action'"},
+    "tenant_id": {"type": "string"},
+    "correlation_key": {"type": "string"},
+    "rule_id": {"type": "string"},
+    "rule_version": {"type": "integer"},
+    "template_id": {"type": "string"},
+    "series_id": {"type": "string", "format": "uuid"},
+    "occurrence_index": {"type": "integer", "minimum": 1},
+    "due_at": {"type": "string", "format": "date-time"},
+    "emitted_at": {"type": "string", "format": "date-time"},
+    "body": {"type": "object", "description": "Resolved body, immutable"}
+  },
+  "additionalProperties": true
+}

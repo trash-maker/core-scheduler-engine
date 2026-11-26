@@ -14,6 +14,7 @@ import io.notifengine.core.signals.SignalStore;
 import io.notifengine.domain.notification.Event;
 import io.notifengine.domain.rule.CompiledRule;
 import org.jboss.logging.Logger;
+import org.jboss.logging.MDC;
 
 import java.sql.Connection;
 import java.sql.SQLException;
@@ -98,6 +99,11 @@ public final class TimerService {
 
     /** Handles one timer under its own savepoint; failures are re-queued with backoff or dead-lettered. */
     private void single(Connection c, TimerRow t, Instant now) throws SQLException {
+        MDC.put("timer_id", t.id());
+        MDC.put("timer_kind", t.kind().name());
+        MDC.put("tenant_id", t.tenantId());
+        if (t.notificationId() != null) MDC.put("notification_id", t.notificationId().toString());
+        if (t.seriesId() != null) MDC.put("series_id", t.seriesId().toString());
         try {
             Tx.savepoint(c, cx -> { faults.before(t); handle(cx, t, now); return null; });
             metrics.count("timers.fired", "kind", t.kind().name());
@@ -113,6 +119,8 @@ public final class TimerService {
                 LOG.warnf("timer %d (%s) failed (%d), retry in %d ms: %s", t.id(), t.kind(), t.failures() + 1, backoff, err);
                 timers.reschedule(c, t, now.plusMillis(backoff), err);
             }
+        } finally {
+            for (String k : new String[]{"timer_id", "timer_kind", "tenant_id", "notification_id", "series_id"}) MDC.remove(k);
         }
     }
 

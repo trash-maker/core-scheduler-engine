@@ -1,0 +1,80 @@
+{
+  "id": "r1",
+  "version": 1,
+  "enabled": true,
+  "timezone": "Europe/Rome",
+  "onMissingValue": "FAIL",
+  "trigger": {
+    "mode": "ON_BECOMES_TRUE",
+    "onMissing": "FALSE",
+    "expression": {
+      "or": [
+        {
+          "and": [
+            {
+              "signal": "kpi1",
+              "op": ">",
+              "value": 5
+            },
+            {
+              "dateMatches": {
+                "source": "NOW",
+                "recurrence": {
+                  "cron": "0 0 1 * *"
+                },
+                "tolerance": "PT1H"
+              }
+            }
+          ]
+        },
+        {
+          "signal": "kpi2",
+          "op": "=",
+          "value": true,
+          "maxAge": "P1D"
+        }
+      ]
+    }
+  },
+  "templates": [
+    {
+      "id": "main",
+      "type": "SCHEDULED",
+      "action": "SEND_EMAIL",
+      "dueAt": {
+        "from": "$signal:due_date",
+        "offset": "-P3D",
+        "atTime": "09:00"
+      },
+      "retryPolicy": {
+        "maxAttempts": 3,
+        "backoff": "EXPONENTIAL",
+        "initialDelay": "PT1M",
+        "multiplier": 2.0,
+        "attemptTimeout": "PT2M"
+      },
+      "body": {
+        "to": {
+          "$signal": "customer_email"
+        },
+        "subject": "Reminder ${correlationKey}"
+      }
+    },
+    {
+      "id": "fallback",
+      "type": "SCHEDULED",
+      "action": "SEND_SMS",
+      "parent": {
+        "templateId": "main",
+        "trigger": "ON_RETRIES_EXHAUSTED",
+        "delay": "PT15M"
+      },
+      "body": {
+        "failureReason": {
+          "$parent": "$.lastFailure.reason",
+          "default": "unknown"
+        }
+      }
+    }
+  ]
+}

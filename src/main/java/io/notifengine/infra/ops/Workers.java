@@ -44,7 +44,12 @@ public class Workers {
         if (cfg.hasRole("relay")) {
             for (int i = 0; i < cfg.relay().workers(); i++) threads.add(Thread.ofVirtual().name("outbox-relay-" + i).start(this::relayLoop));
         }
-        LOG.infof("notification engine started: roles=%s timerWorkers=%d", cfg.roles(), timerWorkers.size());
+        var c = org.eclipse.microprofile.config.ConfigProvider.getConfig();
+        LOG.infof("notification engine started: roles=%s timerWorkers=%d channels: signals-in=%s results-in=%s fake-actuator-in=%s",
+                cfg.roles(), timerWorkers.size(),
+                c.getOptionalValue("mp.messaging.incoming.signals-in.enabled", String.class).orElse("?"),
+                c.getOptionalValue("mp.messaging.incoming.results-in.enabled", String.class).orElse("?"),
+                c.getOptionalValue("mp.messaging.incoming.fake-actuator-in.enabled", String.class).orElse("?"));
     }
 
     private void relayLoop() {

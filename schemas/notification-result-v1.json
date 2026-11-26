@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:notification-engine:notification-result:v1",
+  "title": "Actuator outcome (topic notification.results, key = tenant_id:notification_id)",
+  "type": "object",
+  "required": ["notification_id", "attempt", "action", "outcome"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "notification_id": {"type": "string", "format": "uuid"},
+    "attempt": {"type": "integer", "minimum": 1},
+    "action": {"type": "string", "description": "Must equal the notification's action, otherwise the result is ignored (logged, counted)"},
+    "tenant_id": {"type": "string", "description": "Optional; if present must match"},
+    "outcome": {"enum": ["SUCCESS", "FAILURE", "PERMANENT_FAILURE"]},
+    "reason": {"type": "string", "maxLength": 1000},
+    "occurred_at": {"type": "string", "format": "date-time"}
+  },
+  "additionalProperties": true
+}

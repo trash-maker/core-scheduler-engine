@@ -10,6 +10,7 @@ import io.notifengine.core.ports.EngineMetrics;
 import io.notifengine.domain.notification.Event;
 import io.notifengine.domain.notification.OutcomeType;
 import org.jboss.logging.Logger;
+import org.jboss.logging.MDC;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -111,6 +112,8 @@ public final class ResultService {
             }
             for (Outcome o : sequential) {
                 NotificationRow r = rows.get(o.notificationId());
+                MDC.put("notification_id", r.id().toString());
+                MDC.put("tenant_id", r.tenantId());
                 try {
                     NotificationRow updated = Tx.savepoint(c, cx -> engine.apply(cx, r, event(o), now));
                     rows.put(r.id(), updated);
@@ -118,6 +121,9 @@ public final class ResultService {
                 } catch (RuntimeException e) {
                     LOG.errorf(e, "applying outcome for %s failed", r.id());
                     dlq.record(c, "notification.results", r.tenantId(), "OUTCOME_FAILED", e.getMessage(), o.raw(), now);
+                } finally {
+                    MDC.remove("notification_id");
+                    MDC.remove("tenant_id");
                 }
             }
             return new Stats(payloads.size(), invalid.size(), applied, ignored);

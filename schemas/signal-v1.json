@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:notification-engine:signal:v1",
+  "title": "Signal envelope (topic signals.in, key = tenant_id + correlation_key)",
+  "type": "object",
+  "required": ["signal_id", "tenant_id", "correlation_key", "signal", "kind", "value", "occurred_at"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "signal_id": {"type": "string", "minLength": 1, "maxLength": 256, "description": "Idempotency key (per tenant)"},
+    "tenant_id": {"type": "string", "pattern": "^[A-Za-z0-9_.:-]{1,128}$"},
+    "correlation_key": {"type": "string", "minLength": 1, "maxLength": 256, "description": "Entity the signal belongs to"},
+    "signal": {"type": "string", "pattern": "^[A-Za-z0-9_.:-]{1,128}$", "description": "Signal name referenced by rules"},
+    "kind": {"enum": ["KPI", "DATE"]},
+    "value": {
+      "description": "KPI: number | boolean | string; DATE: ISO-8601 date, local date-time or offset date-time",
+      "type": ["number", "boolean", "string"]
+    },
+    "occurred_at": {"type": "string", "format": "date-time", "description": "Stored value changes only if newer"}
+  },
+  "additionalProperties": true
+}

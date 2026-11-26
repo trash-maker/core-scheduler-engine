@@ -1,0 +1,5 @@
+target/*
+!target/quarkus-app
+.git
+docs
+src

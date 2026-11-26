@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:notification-engine:dead-letter:v1",
+  "title": "Dead letter (topic notifications.dlq; also stored in table dead_letter)",
+  "type": "object",
+  "required": ["source", "reason", "at"],
+  "properties": {
+    "source": {"type": "string", "examples": ["signals.in", "notification.results", "rule-firing", "child-activation", "series-occurrence"]},
+    "tenant_id": {"type": "string"},
+    "reason": {"type": "string", "examples": ["INVALID_MESSAGE", "BODY_RESOLUTION_FAILED", "BODY_SCHEMA_VIOLATION", "TIME_BASE_MISSING", "EVALUATION_FAILED", "OUTCOME_FAILED"]},
+    "detail": {"type": "string"},
+    "payload": {"type": "string", "description": "Original message, when there is one"},
+    "at": {"type": "string", "format": "date-time"}
+  }
+}
