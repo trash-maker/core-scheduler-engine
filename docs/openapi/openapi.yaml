@@ -1,0 +1,1115 @@
+---
+openapi: 3.1.0
+tags:
+- name: notifications
+- name: ops
+- name: rules
+paths:
+  /api/v1/ops/partitions/ensure:
+    post:
+      tags:
+      - ops
+      parameters:
+      - name: monthsAhead
+        in: query
+        schema:
+          type: integer
+          format: int32
+          default: 3
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  type: integer
+                  format: int32
+      security:
+      - jwt: []
+      summary: Partitions
+  /api/v1/ops/retention/run:
+    post:
+      tags:
+      - ops
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RetentionReport"
+      security:
+      - jwt: []
+      summary: Retention
+  /api/v1/ops/stats:
+    get:
+      tags:
+      - ops
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueueStats"
+      security:
+      - jwt: []
+      summary: Stats
+  /api/v1/ops/timers/dead:
+    get:
+      tags:
+      - ops
+      parameters:
+      - name: after
+        in: query
+        schema:
+          type: integer
+          format: int64
+          default: 0
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          format: int32
+          default: 100
+      - name: tenant
+        in: query
+        schema:
+          type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TimerRow"
+      security:
+      - jwt: []
+      summary: Dead
+  /api/v1/ops/timers/dead/requeue:
+    post:
+      summary: "Move dead timers back to the queue (due now, failures reset)"
+      tags:
+      - ops
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Ids"
+        required: true
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  type: integer
+                  format: int32
+        "400":
+          description: Bad Request
+      security:
+      - jwt: []
+  /api/v1/tenants/{tenant}/entities/{key}/rules:
+    get:
+      summary: Inspect rule states of one entity
+      tags:
+      - notifications
+      parameters:
+      - name: key
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RuleStateDto"
+      security:
+      - jwt: []
+  /api/v1/tenants/{tenant}/entities/{key}/signals:
+    get:
+      summary: Inspect stored signal values of one entity
+      tags:
+      - notifications
+      parameters:
+      - name: key
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {}
+      security:
+      - jwt: []
+  /api/v1/tenants/{tenant}/notifications:
+    get:
+      summary: "Search notifications (keyset pagination: pass nextCursor as cursor)"
+      tags:
+      - notifications
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: action
+        in: query
+        schema:
+          type: string
+      - name: correlationKey
+        in: query
+        schema:
+          type: string
+      - name: cursor
+        in: query
+        schema:
+          $ref: "#/components/schemas/UUID"
+      - name: dueFrom
+        in: query
+        schema:
+          $ref: "#/components/schemas/Instant"
+      - name: dueTo
+        in: query
+        schema:
+          $ref: "#/components/schemas/Instant"
+      - name: id
+        in: query
+        schema:
+          $ref: "#/components/schemas/UUID"
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          format: int32
+          default: 50
+      - name: ruleId
+        in: query
+        schema:
+          type: string
+      - name: status
+        in: query
+        schema:
+          $ref: "#/components/schemas/NotificationStatus"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PageNotificationDto"
+      security:
+      - jwt: []
+  /api/v1/tenants/{tenant}/notifications/{id}:
+    get:
+      tags:
+      - notifications
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/UUID"
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotificationDto"
+      security:
+      - jwt: []
+      summary: Get
+  /api/v1/tenants/{tenant}/notifications/{id}/cancel:
+    post:
+      summary: Cancel a non-terminal notification (409 if terminal); closes its WHILE_IN_STATE
+        series
+      tags:
+      - notifications
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/UUID"
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotificationDto"
+      security:
+      - jwt: []
+  /api/v1/tenants/{tenant}/notifications/{id}/history:
+    get:
+      summary: Append-only status history
+      tags:
+      - notifications
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/UUID"
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HistoryDto"
+      security:
+      - jwt: []
+  /api/v1/tenants/{tenant}/notifications/{id}/retrigger:
+    post:
+      summary: "Re-publish now with a fresh retry budget (from RETRIES_EXHAUSTED,\
+        \ CANCELLED or EXPIRED)"
+      tags:
+      - notifications
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/UUID"
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotificationDto"
+      security:
+      - jwt: []
+  /api/v1/tenants/{tenant}/rules:
+    get:
+      summary: List current rule versions (keyset pagination by id)
+      tags:
+      - rules
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: after
+        in: query
+        schema:
+          type: string
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          format: int32
+          default: 50
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PageRuleDto"
+      security:
+      - jwt: []
+    post:
+      summary: Create a rule (version 1). 400 with precise error paths when invalid
+      tags:
+      - rules
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JsonNode"
+        required: true
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {}
+        "400":
+          description: Bad Request
+      security:
+      - jwt: []
+  /api/v1/tenants/{tenant}/rules/dry-run:
+    post:
+      summary: "Dry-run: truth value of every expression node and the notifications\
+        \ (with resolved bodies) that would be created"
+      tags:
+      - rules
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DryRunRequest"
+        required: true
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JsonNode"
+        "400":
+          description: Bad Request
+      security:
+      - jwt: []
+  /api/v1/tenants/{tenant}/rules/validate:
+    post:
+      summary: Validate a rule without saving it
+      tags:
+      - rules
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JsonNode"
+        required: true
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidationResult"
+        "400":
+          description: Bad Request
+      security:
+      - jwt: []
+  /api/v1/tenants/{tenant}/rules/{id}:
+    put:
+      summary: Save a new version (hot reloaded; existing notifications keep their
+        frozen bodies)
+      tags:
+      - rules
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JsonNode"
+        required: true
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuleDto"
+        "400":
+          description: Bad Request
+      security:
+      - jwt: []
+    get:
+      tags:
+      - rules
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: version
+        in: query
+        schema:
+          type: integer
+          format: int32
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuleDto"
+      security:
+      - jwt: []
+      summary: Get
+  /api/v1/tenants/{tenant}/rules/{id}/disable:
+    post:
+      tags:
+      - rules
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuleDto"
+      security:
+      - jwt: []
+      summary: Disable
+  /api/v1/tenants/{tenant}/rules/{id}/enable:
+    post:
+      tags:
+      - rules
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuleDto"
+      security:
+      - jwt: []
+      summary: Enable
+  /api/v1/tenants/{tenant}/rules/{id}/state/{key}:
+    get:
+      summary: "Inspect rule state (last result, edge_seq, for/within memory) of one\
+        \ entity"
+      tags:
+      - rules
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: key
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuleStateDto"
+      security:
+      - jwt: []
+    delete:
+      summary: Reset rule state of one entity (the next true evaluation fires again)
+      tags:
+      - rules
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: key
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {}
+      security:
+      - jwt: []
+  /api/v1/tenants/{tenant}/rules/{id}/versions:
+    get:
+      tags:
+      - rules
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RuleDto"
+      security:
+      - jwt: []
+      summary: Versions
+  /api/v1/tenants/{tenant}/series/{id}:
+    get:
+      tags:
+      - notifications
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/UUID"
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SeriesDto"
+      security:
+      - jwt: []
+      summary: Series
+  /api/v1/tenants/{tenant}/series/{id}/cancel:
+    post:
+      tags:
+      - notifications
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/UUID"
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SeriesDto"
+      security:
+      - jwt: []
+      summary: Cancel Series
+components:
+  schemas:
+    DryRunRequest:
+      type: object
+      properties:
+        rule:
+          $ref: "#/components/schemas/JsonNode"
+        ruleId:
+          type: string
+        correlationKey:
+          type: string
+        signals:
+          $ref: "#/components/schemas/JsonNode"
+        now:
+          $ref: "#/components/schemas/Instant"
+        trigger:
+          $ref: "#/components/schemas/JsonNode"
+        priorState:
+          $ref: "#/components/schemas/PriorState"
+    Failure:
+      type: object
+      properties:
+        outcome:
+          type: string
+        reason:
+          type: string
+        attempt:
+          type: integer
+          format: int32
+        at:
+          $ref: "#/components/schemas/Instant"
+    HistoryDto:
+      type: object
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/HistoryEntry"
+    HistoryEntry:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        at:
+          $ref: "#/components/schemas/Instant"
+        from:
+          type: string
+        to:
+          type: string
+        event:
+          type: string
+        attempt:
+          type: integer
+          format: int32
+        reason:
+          type: string
+    Ids:
+      type: object
+      properties:
+        ids:
+          type: array
+          items:
+            type: integer
+            format: int64
+    Instant:
+      type: string
+      format: date-time
+      examples:
+      - 2022-03-10T16:15:50Z
+    JsonNode:
+      type: object
+      properties:
+        empty:
+          type: boolean
+        valueNode:
+          type: boolean
+        containerNode:
+          type: boolean
+        missingNode:
+          type: boolean
+        array:
+          type: boolean
+        object:
+          type: boolean
+        nodeType:
+          $ref: "#/components/schemas/JsonNodeType"
+        pojo:
+          type: boolean
+        number:
+          type: boolean
+        integralNumber:
+          type: boolean
+        floatingPointNumber:
+          type: boolean
+        short:
+          type: boolean
+        int:
+          type: boolean
+        long:
+          type: boolean
+        float:
+          type: boolean
+        double:
+          type: boolean
+        bigDecimal:
+          type: boolean
+        bigInteger:
+          type: boolean
+        textual:
+          type: boolean
+        boolean:
+          type: boolean
+        "null":
+          type: boolean
+        binary:
+          type: boolean
+    JsonNodeType:
+      type: string
+      enum:
+      - ARRAY
+      - BINARY
+      - BOOLEAN
+      - MISSING
+      - "NULL"
+      - NUMBER
+      - OBJECT
+      - POJO
+      - STRING
+    NotificationDto:
+      type: object
+      properties:
+        id:
+          $ref: "#/components/schemas/UUID"
+        tenantId:
+          type: string
+        ruleId:
+          type: string
+        ruleVersion:
+          type: integer
+          format: int32
+        templateId:
+          type: string
+        correlationKey:
+          type: string
+        action:
+          type: string
+        type:
+          type: string
+        status:
+          type: string
+        statusReason:
+          type: string
+        attempt:
+          type: integer
+          format: int32
+        cycleAttempts:
+          type: integer
+          format: int32
+        retryPolicy:
+          $ref: "#/components/schemas/JsonNode"
+        createdAt:
+          $ref: "#/components/schemas/Instant"
+        updatedAt:
+          $ref: "#/components/schemas/Instant"
+        dueAt:
+          $ref: "#/components/schemas/Instant"
+        expiresAt:
+          $ref: "#/components/schemas/Instant"
+        publishedAt:
+          $ref: "#/components/schemas/Instant"
+        terminalAt:
+          $ref: "#/components/schemas/Instant"
+        parentId:
+          $ref: "#/components/schemas/UUID"
+        parentTrigger:
+          type: string
+        seriesId:
+          $ref: "#/components/schemas/UUID"
+        occurrenceIndex:
+          type: integer
+          format: int32
+        cancelOnEvents:
+          type: array
+          items:
+            type: string
+        lastFailure:
+          $ref: "#/components/schemas/Failure"
+        idempotencyKey:
+          type: string
+        body:
+          $ref: "#/components/schemas/JsonNode"
+    NotificationStatus:
+      type: string
+      enum:
+      - WAITING_ON_PARENT
+      - CREATED
+      - SCHEDULED
+      - PUBLISHED
+      - SUCCEEDED
+      - FAILED
+      - RETRY_SCHEDULED
+      - RETRIES_EXHAUSTED
+      - CANCELLED
+      - EXPIRED
+      - SKIPPED
+    PageNotificationDto:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/NotificationDto"
+        nextCursor:
+          type: string
+    PageRuleDto:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuleDto"
+        nextCursor:
+          type: string
+    PriorState:
+      type: object
+      properties:
+        lastResult:
+          type: boolean
+        edgeSeq:
+          type: integer
+          format: int64
+        lastFiredAt:
+          $ref: "#/components/schemas/Instant"
+    QueueStats:
+      type: object
+      properties:
+        pendingTimersByKind:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+        oldestDueLagMs:
+          type: integer
+          format: int64
+        outboxSize:
+          type: integer
+          format: int64
+        outboxOldestAgeMs:
+          type: integer
+          format: int64
+        deadTimers:
+          type: integer
+          format: int64
+        deadLetters24h:
+          type: integer
+          format: int64
+    RetentionReport:
+      type: object
+      properties:
+        notificationsDeleted:
+          type: integer
+          format: int32
+        partitionsDropped:
+          type: array
+          items:
+            type: string
+        dedupDeleted:
+          type: integer
+          format: int32
+        inboxDeleted:
+          type: integer
+          format: int32
+        deadLettersDeleted:
+          type: integer
+          format: int32
+        seriesDeleted:
+          type: integer
+          format: int32
+    RuleDto:
+      type: object
+      properties:
+        tenantId:
+          type: string
+        id:
+          type: string
+        version:
+          type: integer
+          format: int32
+        enabled:
+          type: boolean
+        current:
+          type: boolean
+        createdAt:
+          $ref: "#/components/schemas/Instant"
+        createdBy:
+          type: string
+        definition:
+          $ref: "#/components/schemas/JsonNode"
+    RuleStateDto:
+      type: object
+      properties:
+        ruleId:
+          type: string
+        correlationKey:
+          type: string
+        lastResult:
+          type: boolean
+        edgeSeq:
+          type: integer
+          format: int64
+        lastFiredAt:
+          $ref: "#/components/schemas/Instant"
+        lastEvaluatedAt:
+          $ref: "#/components/schemas/Instant"
+        ruleVersion:
+          type: integer
+          format: int32
+        leafState:
+          $ref: "#/components/schemas/JsonNode"
+    SeriesDto:
+      type: object
+      properties:
+        id:
+          $ref: "#/components/schemas/UUID"
+        ruleId:
+          type: string
+        templateId:
+          type: string
+        correlationKey:
+          type: string
+        action:
+          type: string
+        status:
+          type: string
+        closeReason:
+          type: string
+        parentId:
+          $ref: "#/components/schemas/UUID"
+        startAt:
+          $ref: "#/components/schemas/Instant"
+        untilAt:
+          $ref: "#/components/schemas/Instant"
+        maxOccurrences:
+          type: integer
+          format: int32
+        occurrences:
+          type: integer
+          format: int32
+        skipped:
+          type: integer
+          format: int32
+        nextDueAt:
+          $ref: "#/components/schemas/Instant"
+    TimerKind:
+      type: string
+      enum:
+      - PUBLISH
+      - ATTEMPT_TIMEOUT
+      - EXPIRE
+      - NEXT_OCCURRENCE
+      - RULE_EVAL
+    TimerRow:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        kind:
+          $ref: "#/components/schemas/TimerKind"
+        dueAt:
+          $ref: "#/components/schemas/Instant"
+        tenantId:
+          type: string
+        notificationId:
+          $ref: "#/components/schemas/UUID"
+        seriesId:
+          $ref: "#/components/schemas/UUID"
+        ruleId:
+          type: string
+        correlationKey:
+          type: string
+        payload:
+          $ref: "#/components/schemas/JsonNode"
+        failures:
+          type: integer
+          format: int32
+        lastError:
+          type: string
+        createdAt:
+          $ref: "#/components/schemas/Instant"
+    UUID:
+      type: string
+      format: uuid
+      pattern: "[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}"
+    ValidationError:
+      type: object
+      properties:
+        path:
+          type: string
+        message:
+          type: string
+    ValidationResult:
+      type: object
+      properties:
+        valid:
+          type: boolean
+        errors:
+          type: array
+          items:
+            $ref: "#/components/schemas/ValidationError"
+  securitySchemes:
+    jwt:
+      description: Authentication
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+info:
+  title: Notification engine API
+  version: 1.0.0
+servers:
+- url: http://localhost:8080
+  description: Auto generated value
+- url: http://0.0.0.0:8080
+  description: Auto generated value
