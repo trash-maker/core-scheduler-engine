@@ -1,5 +1,7 @@
 package trash_maker.core.signals;
 
+import jakarta.inject.Singleton;
+
 import trash_maker.core.db.Jdbc;
 import trash_maker.domain.signal.SignalEnvelope;
 import trash_maker.domain.signal.SignalKind;
@@ -20,7 +22,8 @@ import java.util.Map;
 import java.util.Set;
 
 /** signal_inbox (idempotency) and signal_state (latest value per tenant/key/signal), set-based SQL. */
-public final class SignalStore {
+@Singleton
+public class SignalStore {
 
     public record EntityKey(String tenantId, String correlationKey) implements Comparable<EntityKey> {
         public int compareTo(EntityKey o) {

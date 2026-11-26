@@ -1,6 +1,8 @@
 package trash_maker.core.notifications;
 
-import trash_maker.common.Uuid7;
+import jakarta.inject.Singleton;
+
+import trash_maker.core.Uuid7;
 import trash_maker.core.db.Jdbc;
 import trash_maker.domain.notification.Failure;
 import trash_maker.domain.notification.NotificationStatus;
@@ -19,7 +21,8 @@ import java.util.Optional;
 import java.util.UUID;
 
 /** Plain JDBC access to notification, notification_history and notification_dedup. */
-public final class NotificationRepository {
+@Singleton
+public class NotificationRepository {
 
     public static class ConcurrentUpdateException extends RuntimeException {
         public ConcurrentUpdateException(UUID id) { super("concurrent update of notification " + id); }

@@ -2,9 +2,10 @@ package trash_maker.it;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import trash_maker.common.Json;
-import trash_maker.support.E2EResources;
+import trash_maker.support.Containers;
+import trash_maker.support.EndToEndProfile;
 import trash_maker.support.Fx;
-import io.quarkus.test.common.QuarkusTestResource;
+import io.quarkus.test.junit.TestProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.security.TestSecurity;
 import io.restassured.http.ContentType;
@@ -33,7 +34,7 @@ import static org.hamcrest.Matchers.containsString;
 
 /** Full stack: REST rule CRUD -> Kafka signals.in -> evaluation -> outbox -> notifications.out -> results -> SUCCEEDED. */
 @QuarkusTest
-@QuarkusTestResource(value = E2EResources.class, restrictToAnnotatedClass = true)
+@TestProfile(EndToEndProfile.class)
 class EndToEndTest {
     static final String RULE = """
             {"id":"welcome","timezone":"Europe/Rome",
@@ -49,8 +50,8 @@ class EndToEndTest {
                 .then().statusCode(201).body("version", equalTo(1));
         String key = "user-" + UUID.randomUUID();
         Instant now = Instant.now();
-        try (KafkaProducer<String, String> p = new KafkaProducer<>(Map.of("bootstrap.servers", E2EResources.bootstrap()), new StringSerializer(), new StringSerializer());
-             KafkaConsumer<String, String> c = new KafkaConsumer<>(Map.of("bootstrap.servers", E2EResources.bootstrap(), "group.id", "test-" + key,
+        try (KafkaProducer<String, String> p = new KafkaProducer<>(Map.of("bootstrap.servers", Containers.kafka().getBootstrapServers()), new StringSerializer(), new StringSerializer());
+             KafkaConsumer<String, String> c = new KafkaConsumer<>(Map.of("bootstrap.servers", Containers.kafka().getBootstrapServers(), "group.id", "test-" + key,
                      "auto.offset.reset", "earliest"), new StringDeserializer(), new StringDeserializer())) {
             c.subscribe(List.of("notifications.out"));
             for (String[] s : new String[][]{{"email", "\"x@y.z\""}, {"score", "12"}, {"signup", "true"}}) {

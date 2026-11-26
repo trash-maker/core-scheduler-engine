@@ -1,5 +1,7 @@
 package trash_maker.core.notifications;
 
+import jakarta.inject.Singleton;
+
 import trash_maker.core.db.Jdbc;
 
 import java.sql.Connection;
@@ -12,7 +14,8 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
-public final class SeriesRepository {
+@Singleton
+public class SeriesRepository {
 
     /** Inserts; returns false when the idempotency key already exists. */
     public boolean insert(Connection c, SeriesRow s) throws SQLException {

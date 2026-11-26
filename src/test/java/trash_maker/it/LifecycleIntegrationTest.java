@@ -1,5 +1,10 @@
 package trash_maker.it;
 
+import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.TestProfile;
+import jakarta.inject.Inject;
+import trash_maker.support.CoreProfile;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import trash_maker.common.Json;
 import trash_maker.core.notifications.NotificationRow;
@@ -22,13 +27,17 @@ import java.util.Map;
 import static trash_maker.domain.notification.NotificationStatus.*;
 import static org.assertj.core.api.Assertions.assertThat;
 
+@QuarkusTest
+@TestProfile(CoreProfile.class)
 class LifecycleIntegrationTest {
+    @Inject Fx fixture;
+
     static final Instant T0 = Instant.parse("2026-11-26T10:00:00Z");
 
     static String exampleRule() { return RuleParserTest.EXAMPLE.replace("\"tenantId\":\"acme\",", ""); }
 
-    private static Fx exampleFired() {
-        Fx fx = new Fx(T0);
+    private Fx exampleFired() {
+        Fx fx = fixture.reset(T0);
         fx.rule(exampleRule());
         fx.signal("cust-1", "customer_email", "a@b.c");
         fx.date("cust-1", "due_date", "2026-12-10");
@@ -129,7 +138,7 @@ class LifecycleIntegrationTest {
 
     @Test
     void manualRetriggerResetsAttemptCounter() {
-        Fx fx = new Fx(T0);
+        Fx fx = fixture.reset(T0);
         fx.rule("""
                 {"id":"r","trigger":{"expressionText":"x = true"},
                  "templates":[{"id":"t","type":"IMMEDIATE","action":"PUSH","retryPolicy":{"maxAttempts":2,"initialDelay":"PT10S"}}]}""");
@@ -142,7 +151,7 @@ class LifecycleIntegrationTest {
         fx.relay();
         fx.result(n.id(), 2, "PUSH", "FAILURE", "b");
         assertThat(fx.get(n.id()).status()).isEqualTo(RETRIES_EXHAUSTED);
-        fx.e.tx.run(c -> fx.e.notifications.retrigger(c, "acme", n.id(), "ops", fx.now()));
+        fx.e.commands.retrigger("acme", n.id(), "ops");
         List<RecordingPublisher.Msg> m = fx.relay();
         assertThat(m.get(0).payload().get("attempt").asInt()).isEqualTo(3); // unique per message, actuators dedupe on id+attempt
         fx.result(n.id(), 3, "PUSH", "FAILURE", "c");
@@ -151,7 +160,7 @@ class LifecycleIntegrationTest {
 
     @Test
     void whileInStateRunsOnlyWhileParentIsInErrorAndStopsOnRecovery() {
-        Fx fx = new Fx(T0);
+        Fx fx = fixture.reset(T0);
         fx.rule("""
                 {"id":"r","trigger":{"expressionText":"x = true"},
                  "templates":[
@@ -181,7 +190,7 @@ class LifecycleIntegrationTest {
 
     @Test
     void whileInStateStopsAtLimit() {
-        Fx fx = new Fx(T0);
+        Fx fx = fixture.reset(T0);
         fx.rule("""
                 {"id":"r","trigger":{"expressionText":"x = true"},
                  "templates":[
@@ -199,7 +208,7 @@ class LifecycleIntegrationTest {
 
     @Test
     void topLevelRecurringSeriesWithUntilAndCancel() {
-        Fx fx = new Fx(T0);
+        Fx fx = fixture.reset(T0);
         fx.rule("""
                 {"id":"r","timezone":"Europe/Rome","trigger":{"expressionText":"subscribed = true"},
                  "templates":[{"id":"daily","type":"RECURRING","action":"DIGEST","cron":"0 9 * * *","until":"P3D","cancelOnEvents":["unsubscribed"],
@@ -216,7 +225,7 @@ class LifecycleIntegrationTest {
 
     @Test
     void recurringMisfireIsSkipped() {
-        Fx fx = new Fx(T0);
+        Fx fx = fixture.reset(T0);
         fx.rule("""
                 {"id":"r","trigger":{"expressionText":"on = true"},
                  "templates":[{"id":"s","type":"RECURRING","action":"TICK","every":"PT1H","maxOccurrences":5,"misfirePolicy":"SKIP","misfireGrace":"PT5M"}]}""");
@@ -234,7 +243,7 @@ class LifecycleIntegrationTest {
 
     @Test
     void failedResolutionGoesToDlqWithNoPartialSet() {
-        Fx fx = new Fx(T0);
+        Fx fx = fixture.reset(T0);
         fx.rule("""
                 {"id":"r","trigger":{"expressionText":"x = true"},
                  "templates":[{"id":"a","type":"IMMEDIATE","action":"A","body":{"ok":"fine"}},
@@ -247,7 +256,7 @@ class LifecycleIntegrationTest {
 
     @Test
     void ruleEditsDoNotChangeStoredBodies() {
-        Fx fx = new Fx(T0);
+        Fx fx = fixture.reset(T0);
         String v1 = """
                 {"id":"r","trigger":{"expressionText":"x = true"},
                  "templates":[{"id":"a","type":"SCHEDULED","action":"A","dueAt":{"from":"NOW","offset":"PT1H"},"body":{"msg":"v1 ${signal.name}"}},
@@ -267,7 +276,7 @@ class LifecycleIntegrationTest {
 
     @Test
     void dryRunEqualsRealProcessing() {
-        Fx fx = new Fx(T0);
+        Fx fx = fixture.reset(T0);
         fx.rule(exampleRule());
         CompiledRule rule = fx.e.registry.rule("acme", "r1");
         Map<String, SignalValue> s = Map.of(
@@ -290,7 +299,7 @@ class LifecycleIntegrationTest {
 
     @Test
     void expiresBeforePublish() {
-        Fx fx = new Fx(T0);
+        Fx fx = fixture.reset(T0);
         fx.rule("""
                 {"id":"r","trigger":{"expressionText":"x = true"},
                  "templates":[{"id":"a","type":"SCHEDULED","action":"A","dueAt":{"from":"NOW","offset":"PT2H"},"expiresAt":{"from":"NOW","offset":"PT1H"}},

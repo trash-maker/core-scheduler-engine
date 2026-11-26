@@ -1,5 +1,10 @@
 package trash_maker.it;
 
+import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.TestProfile;
+import jakarta.inject.Inject;
+import trash_maker.support.CoreProfile;
+
 import trash_maker.core.notifications.NotificationRow;
 import trash_maker.domain.notification.NotificationStatus;
 import trash_maker.support.Fx;
@@ -13,7 +18,11 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+@QuarkusTest
+@TestProfile(CoreProfile.class)
 class FiringIntegrationTest {
+    @Inject Fx fixture;
+
     // the acceptance expression, IMMEDIATE template echoing the triggering signal
     static final String RULE = """
             {"id":"r1","timezone":"Europe/Rome",
@@ -36,7 +45,7 @@ class FiringIntegrationTest {
                 {"c", "kpi2", "false", "-30"}};
         List<List<Integer>> perms = List.of(List.of(0, 1, 2), List.of(0, 2, 1), List.of(1, 0, 2), List.of(1, 2, 0), List.of(2, 0, 1), List.of(2, 1, 0));
         for (List<Integer> p : perms) {
-            Fx fx = new Fx(FIRST);
+            Fx fx = fixture.reset(FIRST);
             fx.rule(RULE);
             for (int i : p) {
                 String[] s = signals[i];
@@ -52,7 +61,7 @@ class FiringIntegrationTest {
 
     @Test
     void sameResultInOneBatch() {
-        Fx fx = new Fx(FIRST);
+        Fx fx = fixture.reset(FIRST);
         fx.rule(RULE);
         List<String> batch = new ArrayList<>(List.of(
                 Fx.envelope("a", "k1", "kpi1", "KPI", 3, FIRST.minusSeconds(120)),
@@ -68,7 +77,7 @@ class FiringIntegrationTest {
 
     @Test
     void timeConditionFiresWithoutInputAndReArms() {
-        Fx fx = new Fx(MID);
+        Fx fx = fixture.reset(MID);
         fx.rule(RULE);
         fx.signal("k1", "kpi1", 7);
         assertThat(fx.notifications("k1")).isEmpty();
@@ -95,7 +104,7 @@ class FiringIntegrationTest {
 
     @Test
     void staleSignalStopsMatchingWithoutInput() {
-        Fx fx = new Fx(MID);
+        Fx fx = fixture.reset(MID);
         fx.rule(RULE);
         fx.signal("k1", "kpi2", true);
         assertThat(fx.notifications("k1")).hasSize(1);
@@ -110,7 +119,7 @@ class FiringIntegrationTest {
 
     @Test
     void onBecomesTrueFiresOnceAndReArms() {
-        Fx fx = new Fx(MID);
+        Fx fx = fixture.reset(MID);
         fx.rule(RULE);
         fx.signal("k1", "kpi2", true);
         fx.advance(Duration.ofSeconds(1));
@@ -127,7 +136,7 @@ class FiringIntegrationTest {
 
     @Test
     void everyEvaluationWithCooldown() {
-        Fx fx = new Fx(MID);
+        Fx fx = fixture.reset(MID);
         fx.rule("""
                 {"id":"r2","trigger":{"mode":"EVERY_EVALUATION_TRUE","cooldown":"PT10M","expressionText":"temp > 30"},
                  "templates":[{"id":"t","type":"IMMEDIATE","action":"ALERT"}]}""");
@@ -142,7 +151,7 @@ class FiringIntegrationTest {
 
     @Test
     void unreferencedSignalsAreDiscardedUnlessConfigured() {
-        Fx fx = new Fx(MID);
+        Fx fx = fixture.reset(MID);
         fx.rule(RULE);
         var s = fx.signal("k1", "unrelated", 1);
         assertThat(s.unreferenced()).isEqualTo(1);
@@ -151,7 +160,7 @@ class FiringIntegrationTest {
 
     @Test
     void invalidMessagesGoToDlq() {
-        Fx fx = new Fx(MID);
+        Fx fx = fixture.reset(MID);
         fx.rule(RULE);
         var s = fx.e.ingest.ingest(List.of("{not json", "{\"signal_id\":\"x\"}"));
         assertThat(s.invalid()).isEqualTo(2);
@@ -162,7 +171,7 @@ class FiringIntegrationTest {
 
     @Test
     void cancelOnEvents() {
-        Fx fx = new Fx(MID);
+        Fx fx = fixture.reset(MID);
         fx.rule("""
                 {"id":"r3","trigger":{"expressionText":"overdue = true"},
                  "templates":[{"id":"t","type":"SCHEDULED","action":"REMIND","dueAt":{"from":"NOW","offset":"P1D"},"cancelOnEvents":["paid"]}]}""");

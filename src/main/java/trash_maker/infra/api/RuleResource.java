@@ -111,7 +111,7 @@ public class RuleResource {
     @Operation(summary = "Inspect rule state (last result, edge_seq, for/within memory) of one entity")
     public Dtos.RuleStateDto state(@PathParam("tenant") String tenant, @PathParam("id") String id, @PathParam("key") String key) {
         guard.check(tenant);
-        return engine.tx.read(c -> engine.evaluation.states().find(c, new RuleStateRepository.Key(tenant, id, key)))
+        return engine.db.read(c -> engine.evaluation.states().find(c, new RuleStateRepository.Key(tenant, id, key)))
                 .map(Dtos.RuleStateDto::of).orElseThrow(() -> new trash_maker.core.CoreExceptions.NotFound("no state for " + key));
     }
 

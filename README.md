@@ -6,8 +6,9 @@ actuators (selected by `action`) deliver them and report outcomes on `notificati
 scheduling, retries, expiry, recurring series and parent/child chains. PostgreSQL is the source of truth.
 
 * Java 21 · Quarkus 3.33 LTS · PostgreSQL 16 · Kafka · plain JDBC · Flyway · Micrometer/Prometheus · OpenTelemetry · OIDC
-* 123 automated tests (unit, PostgreSQL/Kafka integration via Testcontainers, full-stack `@QuarkusTest`) and a load test.
-* Measured at **1,000 publishes/s**: `timers.lag` p95 36 ms / p99 47 ms with Kafka. A burst drains at about 5,300 msg/s.
+* Business logic in **pure functions** (`domain.*`), unit-tested without any framework; services, transactions (JTA) and
+  adapters on Quarkus, integration-tested with `@QuarkusTest` against real PostgreSQL and Kafka (Testcontainers); a load test.
+* Measured at **1,000 publishes/s**: `timers.lag` p95 4 ms / p99 8 ms with Kafka. A burst drains at about 9,400 msg/s.
   See [load test](#load-test).
 
 ---
@@ -96,12 +97,12 @@ flowchart LR
     API --> PG
 ```
 
-**Layers.** The domain code is free of Quarkus, Kafka and JPA, and this is enforced by `ArchitectureTest`.
+**Layers.** Enforced by `ArchitectureTest`.
 
 | Layer | Package | Contents |
 |---|---|---|
-| Domain (pure, no I/O) | `domain.*` | expression compiler/evaluator + text DSL, cron/period recurrence, rule parser/validator, **state machine**, dependency matrix, body resolver, firing planner (shared by real processing and dry-run) |
-| Core (plain Java + JDBC) | `core.*` | repositories (set-based SQL), signal ingestion, evaluation, notification engine (effects), timers, outbox relay, results, maintenance, `Engine` wiring |
+| Domain (pure functions: no framework, no I/O, no clock/random access, no mutable static state) | `domain.*`, `common.*` | expression compiler/evaluator + text DSL, cron/period recurrence, rule parser/validator, **state machine**, dependency matrix, body resolver, firing planner (shared by real processing and dry-run) |
+| Core (Quarkus CDI beans, JTA transactions, plain JDBC) | `core.*` | repositories (set-based SQL), transactional services (signal ingestion, timers, outbox relay, results, rules, operator commands, maintenance) that load state, call the pure domain functions and persist their effects. No Kafka, JPA, Micrometer or OpenTelemetry: those sit behind ports |
 | Adapters (Quarkus) | `infra.*` | SmallRye Kafka consumers, idempotent Kafka producer, REST resources, CDI producers, scheduled jobs, Micrometer/OTel adapters, health |
 
 **Signal path, one transaction per Kafka batch.**
@@ -118,6 +119,64 @@ If the batched flush fails, it is retried per entity under savepoints, and only 
 **Results path.** A batch consumer locks the notifications in id order and validates attempt and action. It then
 applies the state machine and flushes the effects (retry timer, children, series) in the same transaction.
 
+### Transactions
+
+Transactions are managed by Quarkus (Narayana JTA). Agroal enlists the JDBC connection in the current transaction.
+
+* **Boundaries.** `@Transactional` marks the service entry points: `SignalIngestService.ingest`,
+  `TimerService.runOnce`, `OutboxRelay.relayOnce`, `ResultService.process`, the `RuleService` writes and
+  `NotificationCommands`. Retention needs several short transactions in one call, so it uses
+  `QuarkusTransaction.requiringNew()` through `Db.inNewTx`.
+* **Data access.** Repositories use plain JDBC on the enlisted connection via `Db.with`. Hot paths have no ORM.
+* **Per-item isolation.** Timer handlers and batch fallbacks run under SQL savepoints (`SAVEPOINT` /
+  `ROLLBACK TO SAVEPOINT`). Agroal forbids `Connection.rollback(Savepoint)` on an enlisted connection, and SQL
+  savepoints are the supported equivalent on PostgreSQL. `ReliabilityIntegrationTest` checks that a SQL error inside a
+  savepoint is isolated and that the rest of the transaction commits.
+* **After-commit hooks** (waking local timer workers, refreshing the rule registry) are registered with the JTA
+  `TransactionSynchronizationRegistry`, so a rollback drops them.
+* **Failures.**
+  * A runtime exception or `Error` rolls the whole transaction back. The worker loops and the Kafka consumers retry.
+  * Deadlocks (`40P01`) are retried the same way.
+  * A simulated kill mid-batch is covered by `crashMidBatchLosesNothing`.
+
+### Pure business functions
+
+Every business decision is a pure function in `domain.*` and is unit-tested without Quarkus or a database. The core
+only loads state, calls these functions and persists the effects they return.
+
+| decision | pure function | unit test |
+|---|---|---|
+| expression truth, MISSING/stale, `for`/`within`, next change instants | `Evaluator`, `ExpressionCompiler`, `DslParser` | `ExpressionTest` |
+| firing (edge / cooldown), new rule state, per-entity timer | `FiringDecision`, `RuleEvaluation.Result.nextState/entityTimer` | `RuleEvaluationTest` |
+| notifications to create, due/expiry, resolved bodies (shared with dry-run) | `FiringPlanner`, `BodyResolver` | `BodyResolverTest`, `LifecycleIntegrationTest.dryRunEqualsRealProcessing` |
+| signal idempotency, unreferenced filter, latest value, `$trigger` choice | `SignalBatch` | `SignalBatchTest` |
+| notification lifecycle, retries/backoff, late outcomes, re-trigger | `StateMachine`, `RetryPolicy` | `StateMachineTest` |
+| child activation / skip, WHILE_IN_STATE series | `Dependencies` | `DependencyMatrixTest` |
+| recurring occurrence: parent re-check, limits, misfire, next due | `SeriesStep` | `SeriesStepTest` |
+| outcome parsing and correlation (tenant / action) | `OutcomeMessage` | `MessagesAndRetentionTest` |
+| output message contract (key, headers, payload) | `NotificationMessage` | `MessagesAndRetentionTest` |
+| timer failure backoff / timer_dead, sweep continuation | `TimerFailurePolicy`, `SweepStep` | `TimerAndSweepTest` |
+| recurrences (cron, periods, DST) | `CronRecurrence`, `PeriodRecurrence` | `RecurrenceTest` |
+| rule validation (paths, cycles, depth) | `RuleParser` | `RuleParserTest` |
+| partition retention | `RetentionPolicy` | `MessagesAndRetentionTest` |
+
+`ArchitectureTest` enforces the following for `domain` and `common`:
+* no framework imports;
+* no I/O;
+* no clock or random access (time and randomness are passed in as parameters);
+* no mutable static state.
+
+It also enforces that `core` uses neither Kafka, JPA, Micrometer nor OpenTelemetry.
+
+### Test strategy
+
+| level | how | profile |
+|---|---|---|
+| unit | plain JUnit on the pure functions (≈100 tests, < 1 s) | – |
+| engine integration | `@QuarkusTest` with real PostgreSQL; `MutableClock` and `RecordingPublisher` are CDI alternatives; no background workers, consumers or jobs, so tests drive ingestion, timers, relay and results explicitly | `CoreProfile` |
+| end-to-end | `@QuarkusTest`, all roles, real clock, Kafka + PostgreSQL, REST with `@TestSecurity` | `EndToEndProfile` |
+| load | `@QuarkusTest`, real worker loops, measuring broker (or real Kafka) | `LoadProfile` (`-Pload`) |
+
 ---
 
 ## Folder structure
@@ -133,29 +192,36 @@ applies the state machine and flushes the effects (retry timer, children, series
     ├── resources/db/migration/V1__schema.sql   tables, partitioning function, indexes, autovacuum settings
     ├── resources/application.properties        service configuration (see reference below)
     └── java/trash_maker/
-        ├── common/        Uuid7, IsoAmount (ISO-8601 periods+durations), Json, ValidationError
+        ├── common/        IsoAmount (ISO-8601 periods+durations), Json, ValidationError
         ├── domain/
-        │   ├── signal/        Value (number|boolean|string|date), SignalEnvelope
+        │   ├── signal/        Value (number|boolean|string|date), SignalEnvelope, SignalBatch (dedup/filter/latest)
         │   ├── expr/          Node tree, ExpressionCompiler, DslParser, Evaluator (3-valued, for/within, next-change instants)
         │   ├── recurrence/    CronRecurrence (5 fields, L, names; DST rules), PeriodRecurrence (anchor + n*period)
         │   ├── rule/          RuleParser (validation with JSON paths), CompiledRule, TemplateDef, RetryPolicy, TimeSpec ...
-        │   ├── notification/  StateMachine, Event, Effect, Transition, Dependencies (parent/child matrix)
+        │   ├── notification/  StateMachine, Event, Effect, Transition, Dependencies (parent/child matrix),
+        │   │                  NotificationMessage (output contract), OutcomeMessage (parse + correlation check)
         │   ├── body/          BodyResolver, JsonPath (safe subset), Transforms (whitelist)
-        │   └── evaluation/    FiringDecision, FiringPlanner, RuleEvaluation (single pipeline), FrozenContext
+        │   ├── evaluation/    FiringDecision, FiringPlanner, RuleEvaluation (single pipeline + next state/timer), FrozenContext
+        │   ├── series/        SeriesStep (occurrence, misfire, limits, parent re-check)
+        │   ├── timer/         TimerFailurePolicy (backoff / timer_dead), SweepStep (sweep continuation)
+        │   └── retention/     RetentionPolicy
         ├── core/
-        │   ├── db/            Tx (retries, savepoints, after-commit hooks), Jdbc helpers
+        │   ├── db/            Db (JTA-enlisted connections, SQL savepoints, after-commit hooks), Jdbc helpers
         │   ├── ports/         MessagePublisher, EngineMetrics, TraceContext, TimerWakeup
         │   ├── signals/  rules/  evaluation/  notifications/  timers/  dispatch/  results/  ops/
-        │   └── Engine.java    framework-free wiring (used by Quarkus and by tests)
+        │   ├── Engine.java    CDI facade over the services (used by adapters and tests)
+        │   └── Uuid7.java     time-ordered ids (partition key)
         └── infra/
             ├── config/   NotificationsConfig (@ConfigMapping), EngineProducer, RolesConfigSourceFactory
             ├── kafka/    SignalsConsumer, ResultsConsumer, KafkaMessagePublisher, FakeActuator
             ├── api/      RuleResource (CRUD, validate, dry-run, state), NotificationResource, OpsResource, TenantGuard
             └── ops/      Workers (virtual threads), Jobs (reload, partitions, retention, gauges), metrics, health
 src/test/java/trash_maker/
-    domain/  (truth tables, recurrence/DST, state machine, backoff, body, rule validation, dependency matrix, architecture)
-    it/      FiringIntegrationTest, LifecycleIntegrationTest, ReliabilityIntegrationTest, EndToEndTest (@QuarkusTest + Kafka)
-    load/    LoadTest (-Pload)
+    domain/  plain JUnit on the pure functions (truth tables, recurrence/DST, state machine, backoff, body, rule validation,
+             dependency matrix, signal batch, series step, timer policy, sweep, messages, retention, pipeline, architecture)
+    it/      @QuarkusTest: Firing/Lifecycle/ReliabilityIntegrationTest (CoreProfile), EndToEndTest (EndToEndProfile)
+    support/ CoreProfile, EndToEndProfile, shared Testcontainers, MutableClock + RecordingPublisher (CDI alternatives), Fx fixture
+    load/    LoadTest + LoadProfile (@QuarkusTest, -Pload)
 ```
 
 ---
@@ -294,7 +360,7 @@ Everything time-based is a row in `timer`:
   A crash rolls back the transaction and the timers reappear. Two workers can never run the same timer.
 * **Batched fast path.** Notification timers in a batch lock all their notifications at once (sorted, so no deadlocks).
   Transitions are computed in memory and written with one batched statement per table.
-* **Failure isolation.** If the fast path fails, every timer is handled again individually under a **savepoint**. A
+* **Failure isolation.** If the fast path fails, every timer is handled again individually under a **SQL savepoint**. A
   failing handler is rolled back on its own and re-inserted with exponential backoff (`failure-backoff × 2^failures`).
   After `max-failures` it moves to `timer_dead`, and the rest of the batch still commits.
 * **Handler rules.** Handlers are idempotent and guarded by state (a stale timer is ignored), and they make no remote
@@ -499,18 +565,18 @@ OpenAPI: `docs/openapi/openapi.yaml`, generated at build. It is also served live
 
 ## Load test
 
-`./mvnw verify -Pload` (`LoadTest`). It uses the real clock, the real worker loops, 4 timer workers and 2 relays in one
-process. Run on 4 vCPU with PostgreSQL 16 (Testcontainers, `fsync=off`) and Kafka 3.8. Full report:
+`./mvnw verify -Pload` (`LoadTest`, a `@QuarkusTest` with `LoadProfile`). The application runs its real timer workers
+(4) and outbox relays (2) on the real clock, with JTA transactions. Run on 4 vCPU with PostgreSQL 16 (Testcontainers, `fsync=off`) and Kafka 3.8. Full report:
 `docs/load-test-report.md`.
 
 | scenario | broker | published | throughput | `timers.lag` p95 / p99 | due → Kafka ack p95 / p99 |
 |---|---|---|---|---|---|
-| sustained 1,000/s for 60 s | Kafka | 60,000 / 60,000 | 996 msg/s | **36 / 47 ms** | 144 / 201 ms |
-| sustained 1,000/s for 60 s | in-memory | 60,000 / 60,000 | 999 msg/s | 33 / 43 ms | 117 / 138 ms |
-| burst: 30,000 due at the same instant | Kafka | 30,000 / 30,000 | **5,267 msg/s** drain | 5.1 / 5.4 s (queueing) | 5.3 / 5.5 s |
-| signal ingest (3 signals per entity, batches of 1,500) | – | – | ~5,000–6,000 signals/s, ~2,000 notifications created/s | – | – |
+| sustained 1,000/s for 60 s | Kafka | 60,000 / 60,000 | 999 msg/s | **4 / 8 ms** | 47 / 80 ms |
+| sustained 1,000/s for 60 s | in-memory | 60,000 / 60,000 | 999 msg/s | 3 / 5 ms | 30 / 35 ms |
+| burst: 30,000 due at the same instant | Kafka | 30,000 / 30,000 | **9,375 msg/s** drain | 2.9 / 3.0 s (queueing) | 3.0 / 3.1 s |
+| signal ingest (3 signals per entity, batches of 1,500) | – | – | ~7,800–8,500 signals/s, ~2,700 notifications created/s | – | – |
 
-The sustained rate leaves about 5× headroom before the drain limit. Precision stays well within the 1–2 s target.
+The sustained rate leaves about 9× headroom before the drain limit. Precision stays well within the 1–2 s target.
 
 ---
 
@@ -541,7 +607,7 @@ The sustained rate leaves about 5× headroom before the drain limit. Precision s
 |---|---|
 | `(kpi1 > 5 AND dateMatches) OR kpi2 = true` correct for every combination, any order; time conditions fire without input | `ExpressionTest.acceptanceTruthTable` (20 cases), `FiringIntegrationTest.anyArrivalOrderFiresExactlyOnce`, `timeConditionFiresWithoutInputAndReArms`, `staleSignalStopsMatchingWithoutInput` |
 | each false→true creates notifications exactly once, even with duplicates | `onBecomesTrueFiresOnceAndReArms`, `sameResultInOneBatch`, `redeliveredSignalBatchIsIdempotent` |
-| scheduled/recurring published within precision under load | `LoadTest` (p99 47 ms), `LifecycleIntegrationTest.topLevelRecurringSeriesWithUntilAndCancel`, `recurringMisfireIsSkipped` |
+| scheduled/recurring published within precision under load | `LoadTest` (p99 8 ms), `LifecycleIntegrationTest.topLevelRecurringSeriesWithUntilAndCancel`, `recurringMisfireIsSkipped` |
 | retries follow policy; exhaustion activates children; impossible children skipped; WHILE_IN_STATE only while in error; cycles rejected | `StateMachineTest`, `exampleRuleRetriesExhaustsAndActivatesFallback`, `successStopsRetriesAndSkipsImpossibleChildren`, `whileInState*`, `RuleParserTest.cyclesDepthAndPathsAreReported` |
 | single output topic, `action` in envelope and header, results correlated by id+attempt+action | `EndToEndTest.signalToNotificationToOutcome`, `lateSuccessAfterTimeoutAndActionMismatch` |
 | bodies match config and are immutable; dry-run equals real processing | `BodyResolverTest`, `ruleEditsDoNotChangeStoredBodies`, `dryRunEqualsRealProcessing`, `failedResolutionGoesToDlqWithNoPartialSet` |

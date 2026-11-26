@@ -2,16 +2,16 @@ package trash_maker.support;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import jakarta.enterprise.inject.Instance;
+import jakarta.inject.Inject;
+import jakarta.inject.Singleton;
 import trash_maker.common.Json;
 import trash_maker.core.Engine;
-import trash_maker.core.EngineConfig;
 import trash_maker.core.notifications.NotificationRepository;
 import trash_maker.core.notifications.NotificationRow;
-import trash_maker.core.ports.EngineMetrics;
-import trash_maker.core.ports.TimerWakeup;
-import trash_maker.core.ports.TraceContext;
 import trash_maker.core.signals.SignalIngestService;
 
+import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.Statement;
@@ -22,23 +22,40 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 
-/** Test fixture: core engine on a real PostgreSQL with a controllable clock and an in-memory broker. */
-public final class Fx {
+/** Test fixture bean (CoreProfile): the engine on PostgreSQL with a controllable clock and an in-memory broker. */
+@Singleton
+public class Fx {
     public static final String TENANT = "acme";
-    public final MutableClock clock;
-    public final RecordingPublisher pub = new RecordingPublisher();
-    public final Engine e;
+    @Inject public Engine e;
+    @Inject DataSource ds;
+    @Inject Instance<MutableClock> clockInstance;
+    @Inject Instance<RecordingPublisher> pubInstance;
+    public MutableClock clock;
+    public RecordingPublisher pub;
     private final AtomicLong seq = new AtomicLong();
 
-    public Fx(Instant start) { this(start, EngineConfig.defaults()); }
-
-    public Fx(Instant start, EngineConfig cfg) {
-        Pg.truncateAll();
-        clock = new MutableClock(start);
-        e = new Engine(Pg.dataSource(), clock, cfg, pub, EngineMetrics.NOOP, TraceContext.NONE, TimerWakeup.NONE);
+    /** Fresh state for a test: empty tables, clock at {@code start}, empty broker, reloaded rules, partitions. */
+    public Fx reset(Instant start) {
+        clock = clockInstance.get();
+        pub = pubInstance.get();
+        truncateAll(ds);
+        clock.set(start);
+        pub.reset();
+        e.timers.setFaultInjector(null);
+        e.registry.reloadAll();
         e.maintenance.ensurePartitions(3);
+        return this;
     }
 
+    public static void truncateAll(DataSource ds) {
+        try (Connection c = ds.getConnection(); Statement st = c.createStatement()) {
+            st.execute("""
+                    TRUNCATE signal_inbox, signal_state, rule, rule_state, notification, notification_history, notification_dedup,
+                      recurring_series, timer, timer_dead, outbox, dead_letter""");
+        } catch (Exception ex) {
+            throw new RuntimeException(ex);
+        }
+    }
     public Instant now() { return clock.instant(); }
 
     public void advance(Duration d) { clock.advance(d); }
@@ -101,7 +118,7 @@ public final class Fx {
     }
 
     public List<NotificationRow> notifications(String key) {
-        return e.tx.read(c -> e.notifications.repository().search(c, new NotificationRepository.SearchFilter(TENANT, null, null, null, key,
+        return e.db.read(c -> e.notifications.repository().search(c, new NotificationRepository.SearchFilter(TENANT, null, null, null, key,
                 null, null, null, null, 1000))).reversed();
     }
 
@@ -111,20 +128,20 @@ public final class Fx {
         return l.get(0);
     }
 
-    public NotificationRow get(UUID id) { return e.tx.read(c -> e.notifications.repository().find(c, TENANT, id).orElseThrow()); }
+    public NotificationRow get(UUID id) { return e.db.read(c -> e.notifications.repository().find(c, TENANT, id).orElseThrow()); }
 
     public List<String> history(UUID id) {
-        return e.tx.read(c -> e.notifications.repository().historyOf(c, TENANT, id)).stream().map(h -> h.to()).toList();
+        return e.db.read(c -> e.notifications.repository().historyOf(c, TENANT, id)).stream().map(h -> h.to()).toList();
     }
 
     public long count(String sql) {
-        return e.tx.read(c -> {
+        return e.db.read(c -> {
             try (Statement st = c.createStatement(); ResultSet rs = st.executeQuery(sql)) { rs.next(); return rs.getLong(1); }
         });
     }
 
     public JsonNode query(String sql) {
-        return e.tx.read((Connection c) -> {
+        return e.db.read((Connection c) -> {
             try (Statement st = c.createStatement(); ResultSet rs = st.executeQuery(sql)) {
                 var arr = Json.array();
                 while (rs.next()) arr.add(rs.getString(1));

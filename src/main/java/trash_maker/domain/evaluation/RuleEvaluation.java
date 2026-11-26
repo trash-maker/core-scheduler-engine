@@ -29,7 +29,28 @@ public final class RuleEvaluation {
      * @param planningError set when firing but the plan failed (nothing created, DLQ)
      */
     public record Result(EvalResult evaluation, FiringDecision.Decision decision, FiringPlanner.Plan plan,
-                         PlanningException planningError) {}
+                         PlanningException planningError) {
+
+        /** New persisted rule state for this (rule, entity). */
+        public PriorState nextState(PriorState prior, Instant now) {
+            return new PriorState(decision.newLastResult(), decision.newEdgeSeq(), decision.fire() ? now : prior.lastFiredAt(),
+                    evaluation.memory());
+        }
+
+        /** Per-entity RULE_EVAL timer: empty = none needed, Optional.of(null-free instant) = (re)schedule; delete otherwise. */
+        public EntityTimer entityTimer(boolean entityTimed) {
+            if (!entityTimed) return EntityTimer.NONE;
+            return evaluation.nextEntityChange() == null ? EntityTimer.DELETE : new EntityTimer(evaluation.nextEntityChange());
+        }
+    }
+
+    /** What to do with the per-entity RULE_EVAL timer: {@code at != null} schedule, {@link #DELETE}, {@link #NONE}. */
+    public record EntityTimer(Instant at) {
+        public static final EntityTimer NONE = new EntityTimer(Instant.MIN);
+        public static final EntityTimer DELETE = new EntityTimer(null);
+
+        public boolean schedule() { return at != null && !at.equals(Instant.MIN); }
+    }
 
     public static Result run(CompiledRule rule, String tenantId, String correlationKey, Map<String, SignalValue> signals,
                              JsonNode trigger, Instant now, PriorState prior, Duration defaultMaxAge, BodySchemaValidator schemas) {

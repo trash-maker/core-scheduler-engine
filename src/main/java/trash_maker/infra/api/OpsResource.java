@@ -41,7 +41,7 @@ public class OpsResource {
     public List<TimerRow> dead(@QueryParam("tenant") String tenant, @QueryParam("after") @DefaultValue("0") long after,
                                @QueryParam("limit") @DefaultValue("100") int limit) {
         guard.admin();
-        return engine.tx.read(c -> engine.timerRepository.listDead(c, tenant, after, Math.min(limit, 1000)));
+        return engine.db.read(c -> engine.timerRepository.listDead(c, tenant, after, Math.min(limit, 1000)));
     }
 
     public record Ids(List<Long> ids) {}
@@ -51,7 +51,7 @@ public class OpsResource {
     @Operation(summary = "Move dead timers back to the queue (due now, failures reset)")
     public Map<String, Integer> requeue(Ids ids) {
         guard.admin();
-        return Map.of("requeued", engine.tx.inTx(c -> engine.timerRepository.requeueDead(c, ids.ids(), engine.clock.instant())));
+        return Map.of("requeued", engine.commands.requeueDeadTimers(ids.ids()));
     }
 
     @POST

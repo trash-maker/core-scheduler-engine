@@ -1,5 +1,7 @@
 package trash_maker.core.rules;
 
+import jakarta.inject.Singleton;
+
 import trash_maker.core.db.Jdbc;
 
 import java.sql.Connection;
@@ -11,7 +13,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
-public final class RuleRepository {
+@Singleton
+public class RuleRepository {
 
     private static RuleRecord map(ResultSet rs) throws SQLException {
         return new RuleRecord(rs.getString("tenant_id"), rs.getString("rule_id"), rs.getInt("version"), rs.getBoolean("enabled"),

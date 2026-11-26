@@ -1,12 +1,16 @@
 package trash_maker.core.rules;
 
+import jakarta.inject.Inject;
+import jakarta.inject.Singleton;
+import jakarta.transaction.Transactional;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import trash_maker.common.Json;
 import trash_maker.common.ValidationError;
 import trash_maker.common.ValidationException;
 import trash_maker.core.CoreExceptions;
-import trash_maker.core.db.Tx;
+import trash_maker.core.db.Db;
 import trash_maker.core.evaluation.RuleStateRepository;
 import trash_maker.core.timers.TimerRepository;
 import trash_maker.core.timers.TimerRow;
@@ -20,8 +24,9 @@ import java.time.Instant;
 import java.util.List;
 
 /** Rule CRUD with immutable versions, validation at save time and hot reload of the local registry. */
-public final class RuleService {
-    private final Tx tx;
+@Singleton
+public class RuleService {
+    private final Db db;
     private final RuleRepository repo;
     private final RuleRegistry registry;
     private final TimerRepository timers;
@@ -29,9 +34,10 @@ public final class RuleService {
     private final RuleParser.Options options;
     private final Clock clock;
 
-    public RuleService(Tx tx, RuleRepository repo, RuleRegistry registry, TimerRepository timers, RuleStateRepository states,
+    @Inject
+    public RuleService(Db db, RuleRepository repo, RuleRegistry registry, TimerRepository timers, RuleStateRepository states,
                        RuleParser.Options options, Clock clock) {
-        this.tx = tx;
+        this.db = db;
         this.repo = repo;
         this.registry = registry;
         this.timers = timers;
@@ -63,10 +69,11 @@ public final class RuleService {
         return o;
     }
 
+    @Transactional
     public RuleRecord create(String tenant, JsonNode def, String by) {
         ObjectNode n = normalize(tenant, null, def, 1);
         CompiledRule compiled = RuleParser.compile(n, options);
-        RuleRecord rec = tx.inTx(c -> {
+        RuleRecord rec = db.with(c -> {
             if (repo.current(c, tenant, compiled.id(), true).isPresent() || repo.version(c, tenant, compiled.id(), 1).isPresent())
                 throw new CoreExceptions.Conflict("rule '" + compiled.id() + "' already exists; use PUT to create a new version");
             RuleRecord r = RuleRepository.newRecord(tenant, compiled.id(), 1, compiled.def().enabled(), n, clock.instant(), by);
@@ -74,12 +81,13 @@ public final class RuleService {
             scheduleSweep(c, compiled);
             return r;
         });
-        registry.refresh();
+        db.afterCommit(registry::refresh);
         return rec;
     }
 
+    @Transactional
     public RuleRecord update(String tenant, String ruleId, JsonNode def, String by) {
-        RuleRecord rec = tx.inTx(c -> {
+        RuleRecord rec = db.with(c -> {
             RuleRecord cur = repo.current(c, tenant, ruleId, true).orElseThrow(() -> new CoreExceptions.NotFound("rule " + ruleId));
             int next = cur.version() + 1;
             if (def.hasNonNull("version") && def.get("version").asInt() != next && def.get("version").asInt() != cur.version())
@@ -92,18 +100,19 @@ public final class RuleService {
             scheduleSweep(c, compiled);
             return r;
         });
-        registry.refresh();
+        db.afterCommit(registry::refresh);
         return rec;
     }
 
+    @Transactional
     public RuleRecord setEnabled(String tenant, String ruleId, boolean enabled) {
-        RuleRecord rec = tx.inTx(c -> {
+        RuleRecord rec = db.with(c -> {
             if (repo.setEnabled(c, tenant, ruleId, enabled) == 0) throw new CoreExceptions.NotFound("rule " + ruleId);
             RuleRecord r = repo.current(c, tenant, ruleId, false).orElseThrow();
             if (enabled) scheduleSweep(c, RuleParser.compile(r.definition(), options));
             return r;
         });
-        registry.refresh();
+        db.afterCommit(registry::refresh);
         return rec;
     }
 
@@ -115,10 +124,11 @@ public final class RuleService {
     }
 
     /** Ensures every enabled NOW-based rule has a sweep timer (startup safety net). */
+    @Transactional
     public int ensureSweeps() {
         registry.refresh();
         int[] n = {0};
-        tx.run(c -> {
+        db.run(c -> {
             for (var tr : registry.all().values()) for (CompiledRule r : tr.byId().values()) {
                 if (r.hasNowCondition()) { scheduleSweep(c, r); n[0]++; }
             }
@@ -127,21 +137,22 @@ public final class RuleService {
     }
 
     public RuleRecord get(String tenant, String ruleId, Integer version) {
-        return tx.read(c -> (version == null ? repo.current(c, tenant, ruleId, false) : repo.version(c, tenant, ruleId, version))
+        return db.read(c -> (version == null ? repo.current(c, tenant, ruleId, false) : repo.version(c, tenant, ruleId, version))
                 .orElseThrow(() -> new CoreExceptions.NotFound("rule " + ruleId + (version == null ? "" : " v" + version))));
     }
 
-    public List<RuleRecord> list(String tenant, String after, int limit) { return tx.read(c -> repo.listCurrent(c, tenant, after, limit)); }
+    public List<RuleRecord> list(String tenant, String after, int limit) { return db.read(c -> repo.listCurrent(c, tenant, after, limit)); }
 
-    public List<RuleRecord> versions(String tenant, String ruleId) { return tx.read(c -> repo.versions(c, tenant, ruleId)); }
+    public List<RuleRecord> versions(String tenant, String ruleId) { return db.read(c -> repo.versions(c, tenant, ruleId)); }
 
     public CompiledRule compiledCurrent(String tenant, String ruleId) {
         return RuleParser.compile(get(tenant, ruleId, null).definition(), options);
     }
 
     /** Resets the firing state of one entity for a rule (next true evaluation fires again). */
+    @Transactional
     public boolean resetState(String tenant, String ruleId, String key) {
-        return tx.inTx(c -> {
+        return db.with(c -> {
             timers.deleteRuleEval(c, tenant, ruleId, key);
             return states.delete(c, new RuleStateRepository.Key(tenant, ruleId, key)) > 0;
         });

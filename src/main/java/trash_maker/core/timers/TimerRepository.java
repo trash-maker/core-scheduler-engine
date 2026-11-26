@@ -1,8 +1,11 @@
 package trash_maker.core.timers;
 
+import jakarta.inject.Singleton;
+import jakarta.inject.Inject;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import trash_maker.core.db.Jdbc;
-import trash_maker.core.db.Tx;
+import trash_maker.core.db.Db;
 import trash_maker.core.ports.TimerWakeup;
 import trash_maker.domain.notification.TimerKind;
 
@@ -16,12 +19,18 @@ import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
-public final class TimerRepository {
+@Singleton
+public class TimerRepository {
     private final TimerWakeup wakeup;
+    private final Db db;
 
-    public TimerRepository(TimerWakeup wakeup) { this.wakeup = wakeup; }
+    @Inject
+    public TimerRepository(TimerWakeup wakeup, Db db) {
+        this.wakeup = wakeup;
+        this.db = db;
+    }
 
-    private void hint(Instant due) { Tx.afterCommit(() -> wakeup.hint(due)); }
+    private void hint(Instant due) { db.afterCommit(() -> wakeup.hint(due)); }
 
     public long insert(Connection c, TimerKind kind, Instant due, String tenant, UUID notificationId, UUID seriesId,
                        String ruleId, String key, JsonNode payload) throws SQLException {

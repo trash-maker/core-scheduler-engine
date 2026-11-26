@@ -1,6 +1,9 @@
 package trash_maker.core.rules;
 
-import trash_maker.core.db.Tx;
+import jakarta.inject.Singleton;
+import jakarta.inject.Inject;
+
+import trash_maker.core.db.Db;
 import trash_maker.domain.rule.CompiledRule;
 import trash_maker.domain.rule.RuleParser;
 import org.jboss.logging.Logger;
@@ -17,7 +20,8 @@ import java.util.Set;
  * Hot reload: incremental refresh by rule.change_seq (polled; also called after local writes).
  * Snapshots are immutable and swapped atomically.
  */
-public final class RuleRegistry {
+@Singleton
+public class RuleRegistry {
     private static final Logger LOG = Logger.getLogger(RuleRegistry.class);
 
     /** Per-tenant immutable view. */
@@ -32,15 +36,16 @@ public final class RuleRegistry {
         public boolean isReferenced(String s) { return referenced.contains(s); }
     }
 
-    private final Tx tx;
+    private final Db db;
     private final RuleRepository repo;
     private final RuleParser.Options options;
     private final Map<String, Map<String, CompiledRule>> mutable = new HashMap<>();
     private volatile Map<String, TenantRules> snapshot = Map.of();
     private long seenSeq = -1;
 
-    public RuleRegistry(Tx tx, RuleRepository repo, RuleParser.Options options) {
-        this.tx = tx;
+    @Inject
+    public RuleRegistry(Db db, RuleRepository repo, RuleParser.Options options) {
+        this.db = db;
         this.repo = repo;
         this.options = options;
     }
@@ -60,7 +65,7 @@ public final class RuleRegistry {
 
     /** Loads changes since the last refresh. Cheap when nothing changed (one indexed max() query). */
     public synchronized void refresh() {
-        tx.read(c -> {
+        db.read(c -> {
             long max = repo.maxChangeSeq(c);
             if (max == seenSeq) return null;
             List<RuleRecord> changed = repo.changedSince(c, seenSeq);

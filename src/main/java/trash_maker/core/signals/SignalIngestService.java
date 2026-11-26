@@ -1,8 +1,12 @@
 package trash_maker.core.signals;
 
+import jakarta.inject.Inject;
+import jakarta.inject.Singleton;
+import jakarta.transaction.Transactional;
+
 import trash_maker.common.Json;
 import trash_maker.core.EngineConfig;
-import trash_maker.core.db.Tx;
+import trash_maker.core.db.Db;
 import trash_maker.core.dispatch.DeadLetters;
 import trash_maker.core.evaluation.EvaluationService;
 import trash_maker.core.evaluation.RuleStateRepository;
@@ -10,6 +14,7 @@ import trash_maker.core.notifications.NotificationEngine;
 import trash_maker.core.ports.EngineMetrics;
 import trash_maker.core.rules.RuleRegistry;
 import trash_maker.domain.rule.CompiledRule;
+import trash_maker.domain.signal.SignalBatch;
 import trash_maker.domain.signal.SignalEnvelope;
 import org.jboss.logging.Logger;
 
@@ -30,10 +35,11 @@ import java.util.TreeMap;
  * cancel events -> lock rule_state and evaluate indexed rules per entity -> create notifications/timers.
  * The caller commits Kafka offsets only after this returns (at-least-once input, idempotent processing).
  */
-public final class SignalIngestService {
+@Singleton
+public class SignalIngestService {
     private static final Logger LOG = Logger.getLogger(SignalIngestService.class);
 
-    private final Tx tx;
+    private final Db db;
     private final SignalStore store;
     private final RuleRegistry registry;
     private final EvaluationService evaluation;
@@ -43,9 +49,10 @@ public final class SignalIngestService {
     private final EngineMetrics metrics;
     private final Clock clock;
 
-    public SignalIngestService(Tx tx, SignalStore store, RuleRegistry registry, EvaluationService evaluation, NotificationEngine engine,
+    @Inject
+    public SignalIngestService(Db db, SignalStore store, RuleRegistry registry, EvaluationService evaluation, NotificationEngine engine,
                                DeadLetters dlq, EngineConfig cfg, EngineMetrics metrics, Clock clock) {
-        this.tx = tx;
+        this.db = db;
         this.store = store;
         this.registry = registry;
         this.evaluation = evaluation;
@@ -60,6 +67,7 @@ public final class SignalIngestService {
 
     private record Parsed(SignalEnvelope env, String raw) {}
 
+    @Transactional
     public Stats ingest(List<String> payloads) {
         List<Parsed> valid = new ArrayList<>();
         List<String[]> invalid = new ArrayList<>();
@@ -72,30 +80,18 @@ public final class SignalIngestService {
         }
         metrics.count("signals.received", payloads.size());
         if (!invalid.isEmpty()) metrics.count("signals.invalid", invalid.size());
-        return tx.inTx(c -> {
+        return db.with(c -> {
             Instant now = clock.instant();
             for (String[] inv : invalid) dlq.record(c, "signals.in", null, "INVALID_MESSAGE", inv[1], inv[0], now);
             Set<String> fresh = store.insertInbox(c, valid.stream().map(Parsed::env).toList(), now);
-            List<Parsed> accepted = new ArrayList<>();
-            Set<String> seen = new HashSet<>();
-            int dups = 0, unref = 0;
-            for (Parsed p : valid) {
-                String id = p.env().tenantId() + "|" + p.env().signalId();
-                if (!fresh.contains(id) || !seen.add(id)) { dups++; continue; }
-                RuleRegistry.TenantRules tr = registry.tenant(p.env().tenantId());
-                if (!tr.isReferenced(p.env().signal()) && !cfg.storeUnreferencedSignals()) { unref++; continue; }
-                accepted.add(p);
-            }
+            var sel = SignalBatch.select(valid.stream().map(p -> new SignalBatch.Item<>(p.env(), p)).toList(), fresh,
+                    (tenant, signal) -> registry.tenant(tenant).isReferenced(signal), cfg.storeUnreferencedSignals());
+            List<Parsed> accepted = sel.accepted().stream().map(SignalBatch.Item::raw).toList();
+            int dups = sel.duplicates(), unref = sel.unreferenced();
             if (dups > 0) metrics.count("signals.duplicate", dups);
             if (unref > 0) metrics.count("signals.unreferenced", unref);
-
-            // latest value per (tenant, key, signal) within the batch
             Map<String, Parsed> reduced = new LinkedHashMap<>();
-            for (Parsed p : accepted) {
-                String k = p.env().tenantId() + "|" + p.env().correlationKey() + "|" + p.env().signal();
-                Parsed prev = reduced.get(k);
-                if (prev == null || !p.env().occurredAt().isBefore(prev.env().occurredAt())) reduced.put(k, p);
-            }
+            sel.latest().forEach((k, it) -> reduced.put(k, it.raw()));
             Set<String> changed = store.upsert(c, reduced.values().stream().map(Parsed::env).toList(), now);
             int outOfOrder = reduced.size() - changed.size();
             if (outOfOrder > 0) metrics.count("signals.out_of_order_ignored", outOfOrder);
@@ -114,7 +110,7 @@ public final class SignalIngestService {
                 for (Parsed p : e.getValue()) if (!tr.rulesCancelledBy(p.env().signal()).isEmpty()) names.add(p.env().signal());
                 for (String s : names) {
                     try {
-                        cancelled += Tx.savepoint(c, cx -> engine.cancelBySignal(cx, e.getKey().tenantId(), e.getKey().correlationKey(), s, now));
+                        cancelled += Db.savepoint(c, cx -> engine.cancelBySignal(cx, e.getKey().tenantId(), e.getKey().correlationKey(), s, now));
                     } catch (RuntimeException ex) {
                         LOG.errorf(ex, "cancel by event %s failed for %s", s, e.getKey());
                         dlq.record(c, "signals.in", e.getKey().tenantId(), "CANCEL_FAILED", ex.getMessage(), null, now);
@@ -141,7 +137,7 @@ public final class SignalIngestService {
                 EvaluationService.Buffer all = new EvaluationService.Buffer();
                 for (var e : rulesByEntity.entrySet()) {
                     List<Parsed> causes = changedByEntity.get(e.getKey());
-                    Parsed trigger = causes.stream().max((a, b) -> a.env().occurredAt().compareTo(b.env().occurredAt())).orElseThrow();
+                    Parsed trigger = SignalBatch.trigger(causes.stream().map(p -> new SignalBatch.Item<>(p.env(), p)).toList()).raw();
                     var work = new EvaluationService.EntityWork(e.getKey().tenantId(), e.getKey().correlationKey(), signals.get(e.getKey()),
                             trigger.env().toJson(), trigger.raw(), e.getValue());
                     EvaluationService.Buffer b = new EvaluationService.Buffer();
@@ -156,13 +152,13 @@ public final class SignalIngestService {
                     }
                 }
                 try {
-                    fired = Tx.savepoint(c, cx -> evaluation.flush(cx, all, now));
+                    fired = Db.savepoint(c, cx -> evaluation.flush(cx, all, now));
                 } catch (RuntimeException | java.sql.SQLException batchFailure) {
                     // isolate the poison entity: retry entity by entity, dead-letter the failing ones
                     LOG.warnf("batched flush failed (%s), retrying per entity", batchFailure.getMessage());
                     for (var e : buffers.entrySet()) {
                         try {
-                            fired += Tx.savepoint(c, cx -> evaluation.flush(cx, e.getValue(), now));
+                            fired += Db.savepoint(c, cx -> evaluation.flush(cx, e.getValue(), now));
                         } catch (RuntimeException | java.sql.SQLException ex) {
                             LOG.errorf(ex, "persisting evaluation failed for %s", e.getKey());
                             metrics.count("evaluation.failed");

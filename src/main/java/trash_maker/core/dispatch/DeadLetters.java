@@ -1,5 +1,8 @@
 package trash_maker.core.dispatch;
 
+import jakarta.inject.Singleton;
+import jakarta.inject.Inject;
+
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import trash_maker.common.Json;
 import trash_maker.core.EngineConfig;
@@ -13,11 +16,13 @@ import java.time.Instant;
 import java.util.Map;
 
 /** Records a dead letter (table) and publishes it to the DLQ topic through the outbox, in the caller's transaction. */
-public final class DeadLetters {
+@Singleton
+public class DeadLetters {
     private final OutboxRepository outbox;
     private final EngineConfig cfg;
     private final EngineMetrics metrics;
 
+    @Inject
     public DeadLetters(OutboxRepository outbox, EngineConfig cfg, EngineMetrics metrics) {
         this.outbox = outbox;
         this.cfg = cfg;

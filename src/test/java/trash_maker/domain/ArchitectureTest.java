@@ -12,16 +12,26 @@ import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-/** Domain code is free of Quarkus/Kafka/JPA (and of I/O); core is free of Quarkus/Kafka/JPA. */
+/**
+ * Layering rules:
+ * <ul>
+ *   <li>domain + common: pure business logic - no framework, no I/O, no clock/random access, no mutable static state;</li>
+ *   <li>core: Quarkus/CDI/JTA allowed (services, transactions), but no Kafka, JPA, Micrometer, OpenTelemetry or
+ *       messaging - those stay behind the ports implemented in infra.</li>
+ * </ul>
+ */
 class ArchitectureTest {
-    static final Pattern FRAMEWORK = Pattern.compile("^import\\s+(static\\s+)?(io\\.quarkus|jakarta\\.|javax\\.persistence|org\\.hibernate|org\\.apache\\.kafka|io\\.smallrye|io\\.micrometer|io\\.opentelemetry|org\\.eclipse\\.microprofile)");
-    static final Pattern IO = Pattern.compile("^import\\s+(java\\.sql|javax\\.sql|org\\.jboss\\.logging|trash_maker\\.(core|infra))");
+    static final Pattern ANY_FRAMEWORK = Pattern.compile("^import\\s+(static\\s+)?(io\\.quarkus|jakarta\\.|javax\\.persistence|org\\.hibernate|org\\.apache\\.kafka|io\\.smallrye|io\\.micrometer|io\\.opentelemetry|org\\.eclipse\\.microprofile|io\\.agroal)");
+    static final Pattern IO = Pattern.compile("^import\\s+(java\\.sql|javax\\.sql|java\\.net|java\\.io\\.File|java\\.nio\\.file|org\\.jboss\\.logging|trash_maker\\.(core|infra))");
+    static final Pattern IMPURE_CALLS = Pattern.compile("(Instant\\.now\\(|System\\.currentTimeMillis|Clock\\.system|ThreadLocalRandom|Math\\.random|new Random\\(|SecureRandom|LocalDateTime\\.now\\(|ZonedDateTime\\.now\\()");
+    static final Pattern MUTABLE_STATIC = Pattern.compile("^\\s*(private|public|protected)?\\s*static\\s+(?!final)[\\w<>\\[\\], ?]+\\s+\\w+\\s*(=|;)");
+    static final Pattern CORE_FORBIDDEN = Pattern.compile("^import\\s+(static\\s+)?(javax\\.persistence|jakarta\\.persistence|org\\.hibernate|org\\.apache\\.kafka|io\\.smallrye\\.reactive|io\\.micrometer|io\\.opentelemetry|trash_maker\\.infra)");
 
     static List<String> violations(String dir, Pattern p) throws IOException {
         List<String> out = new ArrayList<>();
         try (Stream<Path> files = Files.walk(Path.of("src/main/java/trash_maker", dir))) {
             for (Path f : files.filter(x -> x.toString().endsWith(".java")).toList()) {
-                for (String line : Files.readAllLines(f)) if (p.matcher(line.trim()).find()) out.add(f + ": " + line.trim());
+                for (String line : Files.readAllLines(f)) if (p.matcher(line.trim().startsWith("import") ? line.trim() : line).find()) out.add(f + ": " + line.trim());
             }
         }
         return out;
@@ -29,13 +39,16 @@ class ArchitectureTest {
 
     @Test
     void domainIsPure() throws IOException {
-        assertThat(violations("domain", FRAMEWORK)).isEmpty();
-        assertThat(violations("domain", IO)).isEmpty();
-        assertThat(violations("common", FRAMEWORK)).isEmpty();
+        for (String dir : List.of("domain", "common")) {
+            assertThat(violations(dir, ANY_FRAMEWORK)).as("framework imports in " + dir).isEmpty();
+            assertThat(violations(dir, IO)).as("I/O imports in " + dir).isEmpty();
+            assertThat(violations(dir, IMPURE_CALLS)).as("clock/random access in " + dir).isEmpty();
+            assertThat(violations(dir, MUTABLE_STATIC)).as("mutable static state in " + dir).isEmpty();
+        }
     }
 
     @Test
-    void coreIsFrameworkFree() throws IOException {
-        assertThat(violations("core", FRAMEWORK)).isEmpty();
+    void coreUsesOnlyQuarkusAndPorts() throws IOException {
+        assertThat(violations("core", CORE_FORBIDDEN)).isEmpty();
     }
 }

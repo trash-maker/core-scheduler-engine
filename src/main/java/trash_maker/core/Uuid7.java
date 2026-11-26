@@ -1,4 +1,4 @@
-package trash_maker.common;
+package trash_maker.core;
 
 import java.security.SecureRandom;
 import java.time.Instant;

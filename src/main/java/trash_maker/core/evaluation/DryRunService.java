@@ -1,5 +1,8 @@
 package trash_maker.core.evaluation;
 
+import jakarta.inject.Singleton;
+import jakarta.inject.Inject;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import trash_maker.core.EngineConfig;
 import trash_maker.domain.body.BodySchemaValidator;
@@ -12,10 +15,12 @@ import java.time.Instant;
 import java.util.Map;
 
 /** Dry-run: runs exactly the production evaluation pipeline on supplied inputs, without any side effect. */
-public final class DryRunService {
+@Singleton
+public class DryRunService {
     private final EngineConfig cfg;
     private final BodySchemaValidator schemas;
 
+    @Inject
     public DryRunService(EngineConfig cfg, BodySchemaValidator schemas) {
         this.cfg = cfg;
         this.schemas = schemas;

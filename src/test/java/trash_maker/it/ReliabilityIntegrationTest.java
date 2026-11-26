@@ -1,7 +1,11 @@
 package trash_maker.it;
 
+import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.TestProfile;
+import jakarta.inject.Inject;
+import trash_maker.support.CoreProfile;
+
 import com.fasterxml.jackson.databind.JsonNode;
-import trash_maker.core.EngineConfig;
 import trash_maker.core.notifications.NotificationRow;
 import trash_maker.domain.notification.NotificationStatus;
 import trash_maker.domain.notification.TimerKind;
@@ -25,14 +29,18 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+@QuarkusTest
+@TestProfile(CoreProfile.class)
 class ReliabilityIntegrationTest {
+    @Inject Fx fixture;
+
     static final Instant T0 = Instant.parse("2026-11-26T10:00:00Z");
     static final String SCHEDULED_RULE = """
             {"id":"r","trigger":{"expressionText":"x = true"},
              "templates":[{"id":"t","type":"SCHEDULED","action":"PUSH","dueAt":{"from":"NOW","offset":"PT1M"},"body":{"k":"${correlationKey}"}}]}""";
 
-    private static Fx withScheduled(int n, EngineConfig cfg) {
-        Fx fx = new Fx(T0, cfg);
+    private Fx withScheduled(int n) {
+        Fx fx = fixture.reset(T0);
         fx.rule(SCHEDULED_RULE);
         List<String> batch = new ArrayList<>();
         for (int i = 0; i < n; i++) batch.add(Fx.envelope("s" + i, "k" + i, "x", "KPI", true, T0));
@@ -46,7 +54,7 @@ class ReliabilityIntegrationTest {
 
     @Test
     void crashMidBatchLosesNothing() {
-        Fx fx = withScheduled(50, EngineConfig.defaults());
+        Fx fx = withScheduled(50);
         fx.advance(Duration.ofMinutes(1));
         AtomicInteger seen = new AtomicInteger();
         fx.e.timers.setFaultInjector(t -> { if (seen.incrementAndGet() == 25) throw new Kill(); });
@@ -70,7 +78,7 @@ class ReliabilityIntegrationTest {
 
     @Test
     void redeliveredSignalBatchIsIdempotent() {
-        Fx fx = new Fx(T0);
+        Fx fx = fixture.reset(T0);
         fx.rule(SCHEDULED_RULE);
         List<String> batch = List.of(Fx.envelope("a", "k1", "x", "KPI", true, T0), Fx.envelope("b", "k2", "x", "KPI", true, T0));
         fx.e.ingest.ingest(batch);
@@ -82,18 +90,13 @@ class ReliabilityIntegrationTest {
 
     @Test
     void publishAckedButCommitLostOnlyDuplicatesOnKafkaSide() {
-        Fx fx = new Fx(T0);
+        Fx fx = fixture.reset(T0);
         fx.rule(SCHEDULED_RULE.replace("SCHEDULED\",\"action\":\"PUSH\",\"dueAt\":{\"from\":\"NOW\",\"offset\":\"PT1M\"}", "IMMEDIATE\",\"action\":\"PUSH\""));
         fx.signal("k", "x", true);
-        // the broker accepts the message but the relay transaction fails afterwards
+        // the broker accepts the message but the instance dies before the relay transaction commits
         AtomicBoolean first = new AtomicBoolean(true);
-        var flaky = new trash_maker.core.dispatch.OutboxRelay(fx.e.tx, new trash_maker.core.dispatch.OutboxRepository(), fx.e.timerRepository,
-                fx.e.notifications.repository(), (topic, key, headers, payload) -> {
-                    var f = fx.pub.publish(topic, key, headers, payload);
-                    if (first.getAndSet(false)) throw new Kill();
-                    return f;
-                }, EngineConfig.defaults(), trash_maker.core.ports.EngineMetrics.NOOP, fx.clock);
-        assertThatThrownBy(flaky::relayOnce).isInstanceOf(Kill.class);
+        fx.pub.afterPublish = () -> { if (first.getAndSet(false)) throw new Kill(); };
+        assertThatThrownBy(fx.e.relay::relayOnce).isInstanceOf(Kill.class);
         fx.relay();
         List<RecordingPublisher.Msg> out = fx.out();
         assertThat(out).hasSize(2);
@@ -105,7 +108,7 @@ class ReliabilityIntegrationTest {
     @Test
     void concurrentWorkersNeverRunTheSameTimerOrPublishTheSameAttemptTwice() throws Exception {
         int n = 3000;
-        Fx fx = withScheduled(n, EngineConfig.defaults().withTimerBatchSize(100));
+        Fx fx = withScheduled(n);
         fx.advance(Duration.ofMinutes(1));
         ExecutorService pool = Executors.newFixedThreadPool(6);
         List<Future<?>> fs = new ArrayList<>();
@@ -127,7 +130,7 @@ class ReliabilityIntegrationTest {
 
     @Test
     void failingHandlerDoesNotBlockItsBatchAndEndsInTimerDead() {
-        Fx fx = withScheduled(20, EngineConfig.defaults());
+        Fx fx = withScheduled(20);
         NotificationRow poisoned = fx.notifications("k7").get(0);
         fx.e.timers.setFaultInjector(t -> {
             if (poisoned.id().equals(t.notificationId())) throw new IllegalStateException("boom");
@@ -141,15 +144,32 @@ class ReliabilityIntegrationTest {
         // runbook: fix the cause, requeue
         fx.e.timers.setFaultInjector(null);
         long deadId = fx.count("SELECT id FROM timer_dead");
-        fx.e.tx.run(c -> fx.e.timerRepository.requeueDead(c, List.of(deadId), fx.now()));
+        fx.e.commands.requeueDeadTimers(List.of(deadId));
         fx.runTimers();
         assertThat(fx.get(poisoned.id()).status()).isEqualTo(NotificationStatus.PUBLISHED);
     }
 
     @Test
+    void sqlErrorInsideSavepointIsIsolatedInTheJtaTransaction() {
+        Fx fx = fixture.reset(T0);
+        fx.e.db.runInNewTx(c -> {
+            try (var st = c.createStatement()) { st.execute("INSERT INTO dead_letter (source, reason, created_at) VALUES ('t', 'kept-1', now())"); }
+            assertThatThrownBy(() -> trash_maker.core.db.Db.savepoint(c, cx -> {
+                try (var st = cx.createStatement()) {
+                    st.execute("INSERT INTO dead_letter (source, reason, created_at) VALUES ('t', 'rolled-back', now())");
+                    st.execute("SELECT 1/0"); // aborts the PostgreSQL transaction
+                }
+                return null;
+            })).isInstanceOf(java.sql.SQLException.class);
+            try (var st = c.createStatement()) { st.execute("INSERT INTO dead_letter (source, reason, created_at) VALUES ('t', 'kept-2', now())"); }
+        });
+        assertThat(fx.query("SELECT reason FROM dead_letter ORDER BY id").toString()).isEqualTo("[\"kept-1\",\"kept-2\"]");
+    }
+
+    @Test
     void retentionDeletesTerminalAndDropsOldPartitions() {
         Instant old = Instant.parse("2026-08-10T10:00:00Z");
-        Fx fx = new Fx(old);
+        Fx fx = fixture.reset(old);
         fx.rule(SCHEDULED_RULE.replace("SCHEDULED\",\"action\":\"PUSH\",\"dueAt\":{\"from\":\"NOW\",\"offset\":\"PT1M\"}", "IMMEDIATE\",\"action\":\"PUSH\""));
         fx.signal("k1", "x", true);
         NotificationRow n1 = fx.notifications("k1").get(0);
@@ -165,12 +185,12 @@ class ReliabilityIntegrationTest {
 
     @Test
     void hotQueriesUseIndexes() {
-        Fx fx = withScheduled(200, EngineConfig.defaults());
-        fx.e.tx.run(c -> { try (var st = c.createStatement()) { st.execute("ANALYZE"); } });
+        Fx fx = withScheduled(200);
+        fx.e.db.run(c -> { try (var st = c.createStatement()) { st.execute("ANALYZE"); } });
         UUID id = fx.notifications("k1").get(0).id();
         String claim = plan("EXPLAIN DELETE FROM timer WHERE id IN (SELECT id FROM timer WHERE due_at <= now() ORDER BY due_at LIMIT 100 FOR UPDATE SKIP LOCKED) RETURNING *", fx);
         assertThat(claim).contains("timer_due_idx");
-        String byId = plan("EXPLAIN SELECT * FROM notification WHERE id='" + id + "' AND created_at='" + trash_maker.common.Uuid7.timestamp(id) + "'", fx);
+        String byId = plan("EXPLAIN SELECT * FROM notification WHERE id='" + id + "' AND created_at='" + trash_maker.core.Uuid7.timestamp(id) + "'", fx);
         assertThat(byId).doesNotContain("Append"); // pruned to a single partition
         String search = plan("EXPLAIN SELECT * FROM notification WHERE tenant_id='acme' AND correlation_key='k1' ORDER BY id DESC LIMIT 50", fx);
         assertThat(search).contains("notification_p").containsIgnoringCase("index");
@@ -179,7 +199,7 @@ class ReliabilityIntegrationTest {
     }
 
     private static String plan(String sql, Fx fx) {
-        JsonNode rows = fx.e.tx.read(c -> {
+        JsonNode rows = fx.e.db.read(c -> {
             try (var st = c.createStatement()) {
                 st.execute("SET enable_seqscan = off");
                 var arr = trash_maker.common.Json.array();

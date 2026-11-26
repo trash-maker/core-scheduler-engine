@@ -1,13 +1,16 @@
 package trash_maker.core.results;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import trash_maker.common.Json;
-import trash_maker.core.db.Tx;
+import jakarta.inject.Inject;
+import jakarta.inject.Singleton;
+import jakarta.transaction.Transactional;
+
+import trash_maker.core.db.Db;
 import trash_maker.core.dispatch.DeadLetters;
 import trash_maker.core.notifications.NotificationEngine;
 import trash_maker.core.notifications.NotificationRow;
 import trash_maker.core.ports.EngineMetrics;
 import trash_maker.domain.notification.Event;
+import trash_maker.domain.notification.OutcomeMessage;
 import trash_maker.domain.notification.OutcomeType;
 import org.jboss.logging.Logger;
 import org.jboss.logging.MDC;
@@ -26,44 +29,40 @@ import java.util.UUID;
  * Actuator outcomes (notification.results): batch -> lock notifications in id order -> validate attempt and action ->
  * state machine -> effects (retry timer, children, series) in one transaction.
  */
-public final class ResultService {
+@Singleton
+public class ResultService {
     private static final Logger LOG = Logger.getLogger(ResultService.class);
 
-    private final Tx tx;
+    private final Db db;
     private final NotificationEngine engine;
     private final DeadLetters dlq;
     private final EngineMetrics metrics;
     private final Clock clock;
 
-    public ResultService(Tx tx, NotificationEngine engine, DeadLetters dlq, EngineMetrics metrics, Clock clock) {
-        this.tx = tx;
+    @Inject
+    public ResultService(Db db, NotificationEngine engine, DeadLetters dlq, EngineMetrics metrics, Clock clock) {
+        this.db = db;
         this.engine = engine;
         this.dlq = dlq;
         this.metrics = metrics;
         this.clock = clock;
     }
 
-    public record Outcome(UUID notificationId, int attempt, String action, OutcomeType outcome, String reason, Instant occurredAt,
-                          String tenantId, String raw) {
-        static Outcome parse(String raw) {
-            JsonNode n = Json.parse(raw);
-            String id = n.path("notification_id").asText(null);
-            if (id == null) throw new IllegalArgumentException("missing notification_id");
-            if (!n.path("attempt").canConvertToInt() || n.path("attempt").asInt() < 1) throw new IllegalArgumentException("attempt must be >= 1");
-            String action = n.path("action").asText(null);
-            if (action == null) throw new IllegalArgumentException("missing action");
-            OutcomeType o;
-            try { o = OutcomeType.valueOf(n.path("outcome").asText()); } catch (IllegalArgumentException e) { throw new IllegalArgumentException("outcome must be SUCCESS, FAILURE or PERMANENT_FAILURE"); }
-            Instant at = n.hasNonNull("occurred_at") ? Instant.parse(n.get("occurred_at").asText()) : Instant.EPOCH;
-            return new Outcome(UUID.fromString(id), n.get("attempt").asInt(), action, o,
-                    n.hasNonNull("reason") ? n.get("reason").asText() : null, at, n.hasNonNull("tenant_id") ? n.get("tenant_id").asText() : null, raw);
-        }
+    private record Outcome(OutcomeMessage msg, String raw) {
+        UUID notificationId() { return msg.notificationId(); }
+        Instant occurredAt() { return msg.occurredAt(); }
+        int attempt() { return msg.attempt(); }
+        String tenantId() { return msg.tenantId(); }
+        String action() { return msg.action(); }
+        trash_maker.domain.notification.OutcomeType outcome() { return msg.outcome(); }
+        static Outcome parse(String raw) { return new Outcome(OutcomeMessage.parse(raw), raw); }
     }
 
-    private static Event event(Outcome o) { return new Event.Outcome(o.attempt(), o.outcome(), o.reason(), o.occurredAt()); }
+    private static Event event(Outcome o) { return o.msg().toEvent(); }
 
     public record Stats(int received, int invalid, int applied, int ignored) {}
 
+    @Transactional
     public Stats process(List<String> payloads) {
         List<Outcome> valid = new ArrayList<>();
         List<String[]> invalid = new ArrayList<>();
@@ -71,7 +70,7 @@ public final class ResultService {
             try { valid.add(Outcome.parse(p)); } catch (RuntimeException e) { invalid.add(new String[]{p, e.getMessage()}); }
         }
         metrics.count("results.received", payloads.size());
-        return tx.inTx(c -> {
+        return db.with(c -> {
             Instant now = clock.instant();
             for (String[] inv : invalid) dlq.record(c, "notification.results", null, "INVALID_MESSAGE", inv[1], inv[0], now);
             Map<UUID, NotificationRow> rows = new HashMap<>();
@@ -82,12 +81,14 @@ public final class ResultService {
             int ignored = 0;
             for (Outcome o : valid) {
                 NotificationRow r = rows.get(o.notificationId());
-                if (r == null) { ignored++; metrics.count("results.unknown_notification"); continue; }
-                if (o.tenantId() != null && !o.tenantId().equals(r.tenantId())) { ignored++; metrics.count("results.tenant_mismatch"); continue; }
-                if (!o.action().equals(r.action())) {
+                OutcomeMessage.Verdict v = o.msg().check(r == null ? null : r.tenantId(), r == null ? null : r.action());
+                if (v != OutcomeMessage.Verdict.APPLY) {
                     ignored++;
-                    metrics.count("results.action_mismatch");
-                    LOG.warnf("result for %s attempt %d ignored: action %s does not match %s", r.id(), o.attempt(), o.action(), r.action());
+                    metrics.count("results.ignored", "verdict", v.name());
+                    if (v == OutcomeMessage.Verdict.ACTION_MISMATCH) {
+                        metrics.count("results.action_mismatch");
+                        LOG.warnf("result for %s attempt %d ignored: action %s does not match %s", r.id(), o.attempt(), o.action(), r.action());
+                    }
                     continue;
                 }
                 metrics.count("results.outcome", "outcome", o.outcome().name(), "action", r.action());
@@ -102,7 +103,7 @@ public final class ResultService {
             int applied = 0;
             List<NotificationRow> results;
             try {
-                results = Tx.savepoint(c, cx -> engine.applyAll(cx, steps, now));
+                results = Db.savepoint(c, cx -> engine.applyAll(cx, steps, now));
                 for (int i = 0; i < steps.size(); i++) {
                     if (results.get(i) != steps.get(i).row()) applied++; else ignored++;
                 }
@@ -115,7 +116,7 @@ public final class ResultService {
                 MDC.put("notification_id", r.id().toString());
                 MDC.put("tenant_id", r.tenantId());
                 try {
-                    NotificationRow updated = Tx.savepoint(c, cx -> engine.apply(cx, r, event(o), now));
+                    NotificationRow updated = Db.savepoint(c, cx -> engine.apply(cx, r, event(o), now));
                     rows.put(r.id(), updated);
                     if (updated != r) applied++; else ignored++;
                 } catch (RuntimeException e) {

@@ -1,5 +1,7 @@
 package trash_maker.core.evaluation;
 
+import jakarta.inject.Singleton;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import trash_maker.common.Json;
@@ -18,7 +20,8 @@ import java.util.Map;
 import java.util.Optional;
 
 /** rule_state: last result + edge_seq per (tenant, rule, correlation_key). Row locks serialize evaluation per entity. */
-public final class RuleStateRepository {
+@Singleton
+public class RuleStateRepository {
 
     public record Key(String tenantId, String ruleId, String correlationKey) implements Comparable<Key> {
         public int compareTo(Key o) {

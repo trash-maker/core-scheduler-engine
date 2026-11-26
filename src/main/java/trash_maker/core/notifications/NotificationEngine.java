@@ -1,9 +1,12 @@
 package trash_maker.core.notifications;
 
+import jakarta.inject.Singleton;
+import jakarta.inject.Inject;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import trash_maker.common.Json;
-import trash_maker.common.Uuid7;
+import trash_maker.core.Uuid7;
 import trash_maker.core.EngineConfig;
 import trash_maker.core.dispatch.DeadLetters;
 import trash_maker.core.dispatch.MessageFactory;
@@ -25,6 +28,7 @@ import trash_maker.domain.notification.StatusChange;
 import trash_maker.domain.notification.TimerKind;
 import trash_maker.domain.notification.Transition;
 import trash_maker.domain.recurrence.Recurrence;
+import trash_maker.domain.series.SeriesStep;
 import trash_maker.domain.rule.CompiledRule;
 import trash_maker.domain.rule.Enums;
 import trash_maker.domain.rule.RuleParser;
@@ -34,8 +38,6 @@ import org.jboss.logging.Logger;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.time.Instant;
-import java.time.ZoneId;
-import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashMap;
@@ -49,7 +51,8 @@ import java.util.UUID;
  * Applies the pure state machine to persistent notifications and executes the requested effects
  * (timers, outbox messages, history, children, series) in the caller's transaction.
  */
-public final class NotificationEngine {
+@Singleton
+public class NotificationEngine {
     private static final Logger LOG = Logger.getLogger(NotificationEngine.class);
 
     private final NotificationRepository notifs;
@@ -63,6 +66,7 @@ public final class NotificationEngine {
     private final TraceContext trace;
     private final BodySchemaValidator schemas;
 
+    @Inject
     public NotificationEngine(NotificationRepository notifs, SeriesRepository series, TimerRepository timers, OutboxRepository outbox,
                               DeadLetters dlq, StateMachine sm, EngineConfig cfg, EngineMetrics metrics, TraceContext trace,
                               BodySchemaValidator schemas) {
@@ -231,8 +235,8 @@ public final class NotificationEngine {
                         else deleteTimerKinds.computeIfAbsent(ct.kinds(), k -> new ArrayList<>()).add(row.id());
                     }
                     case Effect.Emit em -> {
-                        messages.add(new OutboxRepository.NewMessage(cfg.outputTopic(), MessageFactory.key(row),
-                                MessageFactory.headers(row, em.attempt(), trace.currentHeaders()), MessageFactory.payload(row, em.attempt(), now),
+                        var msg = MessageFactory.message(row, em.attempt(), now);
+                        messages.add(new OutboxRepository.NewMessage(cfg.outputTopic(), msg.key(), msg.headers(trace.currentHeaders()), msg.payload(),
                                 row.tenantId(), row.id(), em.attempt(), em.attemptTimeout() == null ? null : em.attemptTimeout().toMillis()));
                         if (em.attempt() > 1) metrics.count("notifications.retries", "action", row.action());
                     }
@@ -368,7 +372,7 @@ public final class NotificationEngine {
         metrics.count("series.closed", "reason", reason);
     }
 
-    /** NEXT_OCCURRENCE handler: re-checks the parent in this (claim) transaction before every occurrence. */
+    /** NEXT_OCCURRENCE handler: re-checks the parent in this (claim) transaction before every occurrence. Decisions: {@link SeriesStep}. */
     public void occurrence(Connection c, UUID seriesId, Instant scheduledAt, Instant now) throws SQLException {
         Optional<SeriesRow> o = series.lock(c, seriesId);
         if (o.isEmpty() || !SeriesRow.ACTIVE.equals(o.get().status())) return;
@@ -376,38 +380,30 @@ public final class NotificationEngine {
         TemplateDef tpl = template(s.spec());
         FrozenContext fc = FrozenContext.fromJson(s.context());
         NotificationRow parent = null;
+        SeriesStep.Parent parentFacts = null;
         if (s.parentId() != null) {
             parent = notifs.lock(c, s.parentId()).orElse(null);
-            if (parent == null || !Dependencies.inStates(tpl.parent().states(), parent.status())) {
-                boolean recovered = parent != null && (parent.status() == NotificationStatus.SUCCEEDED || !parent.status().terminal());
-                closeSeries(c, s, recovered ? "PARENT_RECOVERED" : "PARENT_TERMINATED", now);
-                return;
-            }
+            parentFacts = new SeriesStep.Parent(parent != null, parent == null ? null : parent.status(), tpl.parent().states());
         }
-        if ((s.maxOccurrences() != null && s.occurrences() >= s.maxOccurrences()) || (s.untilAt() != null && scheduledAt.isAfter(s.untilAt()))) {
-            closeSeries(c, s, "LIMIT_REACHED", now);
+        Recurrence rec = tpl.recurrence().build(s.startAt(), fc.zone());
+        SeriesStep.Before step = SeriesStep.before(new SeriesStep.Series(s.occurrences(), s.maxOccurrences(), s.untilAt()), parentFacts,
+                rec, fc.zone(), tpl.misfireGrace(), scheduledAt, now);
+        if (step instanceof SeriesStep.Close close) {
+            closeSeries(c, s, close.reason(), now);
             return;
         }
-        ZoneId zone = fc.zone();
-        Recurrence rec = tpl.recurrence().build(s.startAt(), zone);
+        SeriesStep.Proceed p = (SeriesStep.Proceed) step;
         int occurrences = s.occurrences();
         int skipped = s.skipped();
-        Instant next;
-        boolean misfire = tpl.misfireGrace() != null && now.isAfter(scheduledAt.plus(tpl.misfireGrace()));
-        if (misfire) {
+        if (p.misfire()) {
             skipped++;
-            createOccurrence(c, s, tpl, fc, parent, occurrences + 1, scheduledAt, now, "MISFIRE");
+            createOccurrence(c, s, tpl, fc, parent, p.index(), scheduledAt, now, "MISFIRE");
             metrics.count("series.misfires", "action", s.action());
-            ZonedDateTime n = rec.next(now.atZone(zone));
-            next = n == null ? null : n.toInstant();
-        } else {
-            if (createOccurrence(c, s, tpl, fc, parent, occurrences + 1, scheduledAt, now, null)) occurrences++;
-            else skipped++;
-            ZonedDateTime n = rec.next(scheduledAt.atZone(zone));
-            next = n == null ? null : n.toInstant();
-        }
+        } else if (createOccurrence(c, s, tpl, fc, parent, p.index(), scheduledAt, now, null)) occurrences++;
+        else skipped++;
+        Instant next = p.nextDue();
         SeriesRow updated = SeriesRepository.with(s, s.status(), null, s.startAt(), s.untilAt(), occurrences, skipped, next, now);
-        if ((s.maxOccurrences() != null && occurrences >= s.maxOccurrences()) || next == null || (s.untilAt() != null && next.isAfter(s.untilAt()))) {
+        if (SeriesStep.closeAfter(occurrences, s.maxOccurrences(), next, s.untilAt())) {
             series.update(c, SeriesRepository.with(updated, SeriesRow.CLOSED, "LIMIT_REACHED", s.startAt(), s.untilAt(), occurrences, skipped, null, now));
             timers.deleteForSeries(c, s.id());
             metrics.count("series.closed", "reason", "LIMIT_REACHED");

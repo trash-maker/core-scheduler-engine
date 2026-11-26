@@ -1,9 +1,12 @@
 package trash_maker.core.timers;
 
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import jakarta.inject.Inject;
+import jakarta.inject.Singleton;
+import jakarta.transaction.Transactional;
+
 import trash_maker.common.Json;
 import trash_maker.core.EngineConfig;
-import trash_maker.core.db.Tx;
+import trash_maker.core.db.Db;
 import trash_maker.core.evaluation.EvaluationService;
 import trash_maker.core.evaluation.RuleStateRepository;
 import trash_maker.core.notifications.NotificationEngine;
@@ -22,6 +25,8 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import trash_maker.domain.notification.TimerKind;
+import trash_maker.domain.timer.SweepStep;
+import trash_maker.domain.timer.TimerFailurePolicy;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumSet;
@@ -38,13 +43,14 @@ import java.util.Set;
  * Each handler runs under a savepoint: a failing handler is rolled back alone and re-queued with growing backoff,
  * and moved to timer_dead after N failures. Handlers are idempotent and state-guarded and do no remote calls.
  */
-public final class TimerService {
+@Singleton
+public class TimerService {
     private static final Logger LOG = Logger.getLogger(TimerService.class);
 
     /** Test hook to inject handler failures. */
     public interface FaultInjector { void before(TimerRow t); }
 
-    private final Tx tx;
+    private final Db db;
     private final TimerRepository timers;
     private final NotificationEngine engine;
     private final EvaluationService evaluation;
@@ -55,9 +61,10 @@ public final class TimerService {
     private final Clock clock;
     private volatile FaultInjector faults = t -> {};
 
-    public TimerService(Tx tx, TimerRepository timers, NotificationEngine engine, EvaluationService evaluation, SignalStore signals,
+    @Inject
+    public TimerService(Db db, TimerRepository timers, NotificationEngine engine, EvaluationService evaluation, SignalStore signals,
                         RuleRegistry registry, EngineConfig cfg, EngineMetrics metrics, Clock clock) {
-        this.tx = tx;
+        this.db = db;
         this.timers = timers;
         this.engine = engine;
         this.evaluation = evaluation;
@@ -71,8 +78,9 @@ public final class TimerService {
     public void setFaultInjector(FaultInjector f) { this.faults = f == null ? t -> {} : f; }
 
     /** Claims and handles one batch. Returns the number of timers claimed. */
+    @Transactional
     public int runOnce() {
-        return tx.inTx(c -> {
+        return db.with(c -> {
             Instant now = clock.instant();
             List<TimerRow> batch = timers.claim(c, now, cfg.timerBatchSize());
             // consistent lock order across workers (deadlock avoidance)
@@ -83,7 +91,7 @@ public final class TimerService {
             List<TimerRow> others = new ArrayList<>(batch.stream().filter(t -> !NOTIFICATION_KINDS.contains(t.kind())).toList());
             if (!notifTimers.isEmpty()) {
                 try {
-                    Tx.savepoint(c, cx -> { notificationTimers(cx, notifTimers, now); return null; });
+                    Db.savepoint(c, cx -> { notificationTimers(cx, notifTimers, now); return null; });
                     for (TimerRow t : notifTimers) metrics.count("timers.fired", "kind", t.kind().name());
                 } catch (RuntimeException | SQLException e) {
                     LOG.debugf("batched timer handling failed (%s), isolating per timer", e.getMessage());
@@ -105,19 +113,21 @@ public final class TimerService {
         if (t.notificationId() != null) MDC.put("notification_id", t.notificationId().toString());
         if (t.seriesId() != null) MDC.put("series_id", t.seriesId().toString());
         try {
-            Tx.savepoint(c, cx -> { faults.before(t); handle(cx, t, now); return null; });
+            Db.savepoint(c, cx -> { faults.before(t); handle(cx, t, now); return null; });
             metrics.count("timers.fired", "kind", t.kind().name());
         } catch (RuntimeException | SQLException e) {
             String err = e.getClass().getSimpleName() + ": " + e.getMessage();
             metrics.count("timers.failed", "kind", t.kind().name());
-            if (t.failures() + 1 >= cfg.timerMaxFailures()) {
-                LOG.errorf("timer %d (%s) moved to timer_dead after %d failures: %s", t.id(), t.kind(), t.failures() + 1, err);
-                timers.dead(c, t, err, now);
-                metrics.count("timers.dead", "kind", t.kind().name());
-            } else {
-                long backoff = cfg.timerFailureBackoff().toMillis() * (1L << Math.min(t.failures(), 10));
-                LOG.warnf("timer %d (%s) failed (%d), retry in %d ms: %s", t.id(), t.kind(), t.failures() + 1, backoff, err);
-                timers.reschedule(c, t, now.plusMillis(backoff), err);
+            switch (TimerFailurePolicy.decide(t.failures(), cfg.timerMaxFailures(), cfg.timerFailureBackoff(), now)) {
+                case TimerFailurePolicy.Dead d -> {
+                    LOG.errorf("timer %d (%s) moved to timer_dead after %d failures: %s", t.id(), t.kind(), d.failures(), err);
+                    timers.dead(c, t, err, now);
+                    metrics.count("timers.dead", "kind", t.kind().name());
+                }
+                case TimerFailurePolicy.Retry r -> {
+                    LOG.warnf("timer %d (%s) failed (%d), retry at %s: %s", t.id(), t.kind(), r.failures(), r.dueAt(), err);
+                    timers.reschedule(c, t, r.dueAt(), err);
+                }
             }
         } finally {
             for (String k : new String[]{"timer_id", "timer_kind", "tenant_id", "notification_id", "series_id"}) MDC.remove(k);
@@ -158,7 +168,7 @@ public final class TimerService {
         return "r" + t.tenantId() + "|" + t.ruleId() + "|" + t.correlationKey();
     }
 
-    public Instant nextDue() { return tx.read(timers::nextDue); }
+    public Instant nextDue() { return db.read(timers::nextDue); }
 
     void handle(Connection c, TimerRow t, Instant now) throws SQLException {
         switch (t.kind()) {
@@ -206,17 +216,11 @@ public final class TimerService {
         Set<String> sigs = rule.referencedSignals();
         List<String> page = sigs.isEmpty() ? List.of() : signals.entitiesPage(c, rule.tenantId(), sigs, cursor, cfg.sweepPageSize());
         if (!page.isEmpty()) evaluateEntities(c, rule, page, now);
-        ObjectNode payload = Json.object();
-        if (page.size() == cfg.sweepPageSize()) {
-            payload.put("cursor", page.get(page.size() - 1));
-            payload.put("at", at.toString());
-            timers.upsertSweep(c, rule.tenantId(), rule.id(), now, payload);
-            return;
+        switch (SweepStep.after(page, cfg.sweepPageSize(), at, now, rule::nextRuleChange)) {
+            case SweepStep.Continue k -> timers.upsertSweep(c, rule.tenantId(), rule.id(), now,
+                    Json.object().put("cursor", k.cursor()).put("at", k.sweepInstant().toString()));
+            case SweepStep.Schedule sc -> timers.upsertSweep(c, rule.tenantId(), rule.id(), sc.at(), Json.object().put("at", sc.at().toString()));
+            case SweepStep.Stop st -> { }
         }
-        Instant next = rule.nextRuleChange(at);
-        if (next != null && !next.isAfter(now)) next = rule.nextRuleChange(now);
-        if (next == null) return;
-        payload.put("at", next.toString());
-        timers.upsertSweep(c, rule.tenantId(), rule.id(), next, payload);
     }
 }

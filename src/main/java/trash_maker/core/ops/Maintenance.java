@@ -1,42 +1,45 @@
 package trash_maker.core.ops;
 
+import jakarta.inject.Inject;
+import jakarta.inject.Singleton;
+import jakarta.transaction.Transactional;
+
 import trash_maker.core.EngineConfig;
 import trash_maker.core.db.Jdbc;
-import trash_maker.core.db.Tx;
+import trash_maker.domain.retention.RetentionPolicy;
+import trash_maker.core.db.Db;
 import org.jboss.logging.Logger;
 
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.time.Clock;
 import java.time.Instant;
-import java.time.YearMonth;
-import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /** Partition maintenance, retention and queue statistics. */
-public final class Maintenance {
+@Singleton
+public class Maintenance {
     private static final Logger LOG = Logger.getLogger(Maintenance.class);
-    private static final Pattern PART = Pattern.compile("notification_p(\\d{4})_(\\d{2})");
     private static final int DELETE_BATCH = 5000;
 
-    private final Tx tx;
+    private final Db db;
     private final EngineConfig cfg;
     private final Clock clock;
 
-    public Maintenance(Tx tx, EngineConfig cfg, Clock clock) {
-        this.tx = tx;
+    @Inject
+    public Maintenance(Db db, EngineConfig cfg, Clock clock) {
+        this.db = db;
         this.cfg = cfg;
         this.clock = clock;
     }
 
     /** Creates monthly partitions from last month to {@code monthsAhead} months ahead. */
+    @Transactional
     public int ensurePartitions(int monthsAhead) {
-        return tx.inTx(c -> {
+        return db.with(c -> {
             try (PreparedStatement ps = c.prepareStatement("SELECT ensure_monthly_partitions(?, ?)")) {
                 Jdbc.setTs(ps, 1, clock.instant());
                 ps.setInt(2, monthsAhead);
@@ -70,7 +73,7 @@ public final class Maintenance {
     private int deleteLoop(String sql, Instant cutoff) {
         int total = 0;
         while (true) {
-            int n = tx.inTx(c -> {
+            int n = db.inNewTx(c -> {
                 try (PreparedStatement ps = c.prepareStatement(sql)) {
                     Jdbc.setTs(ps, 1, cutoff);
                     return ps.executeUpdate();
@@ -84,7 +87,7 @@ public final class Maintenance {
     /** Drops monthly partitions entirely older than the cutoff that hold no active notification. */
     private List<String> dropOldPartitions(Instant cutoff) {
         List<String> dropped = new ArrayList<>();
-        List<String> parts = tx.read(c -> {
+        List<String> parts = db.read(c -> {
             List<String> out = new ArrayList<>();
             try (PreparedStatement ps = c.prepareStatement(
                     "SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid WHERE i.inhparent = 'notification'::regclass ORDER BY 1");
@@ -94,17 +97,13 @@ public final class Maintenance {
             return out;
         });
         for (String p : parts) {
-            Matcher m = PART.matcher(p);
-            if (!m.matches()) continue;
-            YearMonth ym = YearMonth.of(Integer.parseInt(m.group(1)), Integer.parseInt(m.group(2)));
-            Instant upper = ym.plusMonths(1).atDay(1).atStartOfDay().toInstant(ZoneOffset.UTC);
-            if (!upper.isBefore(cutoff)) continue;
-            boolean ok = tx.inTx(c -> {
+            if (!RetentionPolicy.expired(p, cutoff)) continue;
+            boolean ok = db.inNewTx(c -> {
                 try (PreparedStatement ps = c.prepareStatement("SELECT 1 FROM " + p + " WHERE terminal_at IS NULL LIMIT 1");
                      ResultSet rs = ps.executeQuery()) {
                     if (rs.next()) return false;
                 }
-                String hist = p.replace("notification_p", "notification_history_p");
+                String hist = RetentionPolicy.historyPartition(p);
                 try (var st = c.createStatement()) {
                     st.execute("ALTER TABLE notification DETACH PARTITION " + p);
                     st.execute("DROP TABLE " + p);
@@ -122,7 +121,7 @@ public final class Maintenance {
 
     public QueueStats stats() {
         Instant now = clock.instant();
-        return tx.read(c -> {
+        return db.read(c -> {
             Map<String, Long> byKind = new LinkedHashMap<>();
             Long lag = null;
             try (PreparedStatement ps = c.prepareStatement("SELECT kind, count(*), min(due_at) FROM timer GROUP BY kind");

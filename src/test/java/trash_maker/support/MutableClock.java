@@ -1,5 +1,8 @@
 package trash_maker.support;
 
+import jakarta.enterprise.inject.Alternative;
+import jakarta.inject.Singleton;
+
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -7,10 +10,11 @@ import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.concurrent.atomic.AtomicReference;
 
-public final class MutableClock extends Clock {
-    private final AtomicReference<Instant> now;
-
-    public MutableClock(Instant start) { this.now = new AtomicReference<>(start); }
+/** Controllable clock, enabled as CDI alternative by {@link CoreProfile}. */
+@Alternative
+@Singleton
+public class MutableClock extends Clock {
+    private final AtomicReference<Instant> now = new AtomicReference<>(Instant.now());
 
     public void set(Instant i) { now.set(i); }
 

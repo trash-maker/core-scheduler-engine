@@ -1,5 +1,7 @@
 package trash_maker.core;
 
+import jakarta.inject.Singleton;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.networknt.schema.JsonSchema;
 import com.networknt.schema.JsonSchemaFactory;
@@ -14,7 +16,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 
 /** JSON Schema (2020-12) validation of resolved bodies; compiled schemas are cached. No remote $ref resolution. */
-public final class SchemaValidators implements BodySchemaValidator {
+@Singleton
+public class SchemaValidators implements BodySchemaValidator {
     private static final JsonSchemaFactory FACTORY = JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V202012,
             b -> b.schemaLoaders(l -> l.add(uri -> { throw new IllegalArgumentException("remote $ref not allowed: " + uri); })));
     private final Map<String, JsonSchema> cache = new ConcurrentHashMap<>();

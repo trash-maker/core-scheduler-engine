@@ -1,8 +1,12 @@
 package trash_maker.core.dispatch;
 
+import jakarta.inject.Inject;
+import jakarta.inject.Singleton;
+import jakarta.transaction.Transactional;
+
 import trash_maker.common.Json;
 import trash_maker.core.EngineConfig;
-import trash_maker.core.db.Tx;
+import trash_maker.core.db.Db;
 import trash_maker.core.notifications.NotificationRepository;
 import trash_maker.core.ports.EngineMetrics;
 import trash_maker.core.ports.MessagePublisher;
@@ -23,10 +27,11 @@ import java.util.concurrent.TimeUnit;
  * deletes acknowledged rows and arms attempt-timeout timers - all in one short transaction.
  * Unacknowledged rows stay for the next round: Kafka publish errors are never counted as attempts.
  */
-public final class OutboxRelay {
+@Singleton
+public class OutboxRelay {
     private static final Logger LOG = Logger.getLogger(OutboxRelay.class);
 
-    private final Tx tx;
+    private final Db db;
     private final OutboxRepository outbox;
     private final TimerRepository timers;
     private final NotificationRepository notifs;
@@ -35,9 +40,10 @@ public final class OutboxRelay {
     private final EngineMetrics metrics;
     private final Clock clock;
 
-    public OutboxRelay(Tx tx, OutboxRepository outbox, TimerRepository timers, NotificationRepository notifs, MessagePublisher publisher,
+    @Inject
+    public OutboxRelay(Db db, OutboxRepository outbox, TimerRepository timers, NotificationRepository notifs, MessagePublisher publisher,
                        EngineConfig cfg, EngineMetrics metrics, Clock clock) {
-        this.tx = tx;
+        this.db = db;
         this.outbox = outbox;
         this.timers = timers;
         this.notifs = notifs;
@@ -49,8 +55,9 @@ public final class OutboxRelay {
 
     public record Result(int claimed, int published, int failed) {}
 
+    @Transactional
     public Result relayOnce() {
-        return tx.inTx(c -> {
+        return db.with(c -> {
             List<OutboxRepository.OutboxRow> rows = outbox.claim(c, cfg.relayBatchSize());
             if (rows.isEmpty()) return new Result(0, 0, 0);
             List<CompletableFuture<Void>> futures = new ArrayList<>(rows.size());

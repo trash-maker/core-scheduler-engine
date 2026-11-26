@@ -1,5 +1,7 @@
 package trash_maker.core.dispatch;
 
+import jakarta.inject.Singleton;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import trash_maker.common.Json;
@@ -16,7 +18,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-public final class OutboxRepository {
+@Singleton
+public class OutboxRepository {
 
     public record OutboxRow(long id, String topic, String key, Map<String, String> headers, String payload, String tenantId,
                             UUID notificationId, Integer attempt, Long attemptTimeoutMs, Instant createdAt) {}

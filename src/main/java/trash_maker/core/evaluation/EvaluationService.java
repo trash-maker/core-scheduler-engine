@@ -1,5 +1,8 @@
 package trash_maker.core.evaluation;
 
+import jakarta.inject.Singleton;
+import jakarta.inject.Inject;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import trash_maker.core.EngineConfig;
 import trash_maker.core.dispatch.DeadLetters;
@@ -22,7 +25,8 @@ import java.util.Map;
  * Evaluates rules for one entity inside the caller's transaction, with rule_state rows already locked.
  * Persists the new rule state, creates notifications on an edge, and maintains the per-entity RULE_EVAL timer.
  */
-public final class EvaluationService {
+@Singleton
+public class EvaluationService {
 
     private final RuleStateRepository states;
     private final NotificationEngine engine;
@@ -32,6 +36,7 @@ public final class EvaluationService {
     private final EngineMetrics metrics;
     private final BodySchemaValidator schemas;
 
+    @Inject
     public EvaluationService(RuleStateRepository states, NotificationEngine engine, TimerRepository timers, DeadLetters dlq,
                              EngineConfig cfg, EngineMetrics metrics, BodySchemaValidator schemas) {
         this.states = states;
@@ -80,8 +85,8 @@ public final class EvaluationService {
                     cfg.defaultSignalMaxAge(), schemas);
             metrics.recordMs("evaluation.time", (System.nanoTime() - t0) / 1_000_000);
             boolean fire = res.decision().fire();
-            buf.states.add(new RuleStateRepository.State(key, res.decision().newLastResult(), res.decision().newEdgeSeq(),
-                    fire ? now : st.lastFiredAt(), now, rule.version(), res.evaluation().memory()));
+            RuleEvaluation.PriorState next = res.nextState(new RuleEvaluation.PriorState(st.lastResult(), st.edgeSeq(), st.lastFiredAt(), st.memory()), now);
+            buf.states.add(new RuleStateRepository.State(key, next.lastResult(), next.edgeSeq(), next.lastFiredAt(), now, rule.version(), next.memory()));
             if (fire) {
                 if (res.planningError() != null) {
                     metrics.count("rules.fire_failed", "reason", res.planningError().code());
@@ -93,12 +98,11 @@ public final class EvaluationService {
                     metrics.count("rules.fired");
                 }
             }
-            if (rule.entityTimed()) {
-                if (res.evaluation().nextEntityChange() != null)
-                    buf.ruleEvalUpserts.add(new TimerRepository.NewTimer(trash_maker.domain.notification.TimerKind.RULE_EVAL,
-                            res.evaluation().nextEntityChange(), w.tenantId(), null, null, rule.id(), w.correlationKey(), null));
-                else buf.ruleEvalDeletes.add(new String[]{w.tenantId(), rule.id(), w.correlationKey()});
-            }
+            RuleEvaluation.EntityTimer et = res.entityTimer(rule.entityTimed());
+            if (et.schedule())
+                buf.ruleEvalUpserts.add(new TimerRepository.NewTimer(trash_maker.domain.notification.TimerKind.RULE_EVAL,
+                        et.at(), w.tenantId(), null, null, rule.id(), w.correlationKey(), null));
+            else if (et == RuleEvaluation.EntityTimer.DELETE) buf.ruleEvalDeletes.add(new String[]{w.tenantId(), rule.id(), w.correlationKey()});
         }
     }
 
