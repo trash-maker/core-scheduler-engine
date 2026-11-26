@@ -59,6 +59,8 @@ public final class ResultService {
         }
     }
 
+    private static Event event(Outcome o) { return new Event.Outcome(o.attempt(), o.outcome(), o.reason(), o.occurredAt()); }
+
     public record Stats(int received, int invalid, int applied, int ignored) {}
 
     public Stats process(List<String> payloads) {
@@ -75,7 +77,8 @@ public final class ResultService {
             for (NotificationRow r : engine.repository().lockMany(c, new LinkedHashSet<>(valid.stream().map(Outcome::notificationId).toList())))
                 rows.put(r.id(), r);
             valid.sort(Comparator.comparing(Outcome::notificationId).thenComparing(Outcome::occurredAt).thenComparing(Outcome::attempt));
-            int applied = 0, ignored = 0;
+            Map<UUID, List<Outcome>> byId = new java.util.LinkedHashMap<>();
+            int ignored = 0;
             for (Outcome o : valid) {
                 NotificationRow r = rows.get(o.notificationId());
                 if (r == null) { ignored++; metrics.count("results.unknown_notification"); continue; }
@@ -87,8 +90,29 @@ public final class ResultService {
                     continue;
                 }
                 metrics.count("results.outcome", "outcome", o.outcome().name(), "action", r.action());
+                byId.computeIfAbsent(o.notificationId(), k -> new ArrayList<>()).add(o);
+            }
+            List<NotificationEngine.Step> steps = new ArrayList<>();
+            List<Outcome> sequential = new ArrayList<>();
+            for (var e : byId.entrySet()) {
+                if (e.getValue().size() == 1) steps.add(new NotificationEngine.Step(rows.get(e.getKey()), event(e.getValue().get(0))));
+                else sequential.addAll(e.getValue());
+            }
+            int applied = 0;
+            List<NotificationRow> results;
+            try {
+                results = Tx.savepoint(c, cx -> engine.applyAll(cx, steps, now));
+                for (int i = 0; i < steps.size(); i++) {
+                    if (results.get(i) != steps.get(i).row()) applied++; else ignored++;
+                }
+            } catch (RuntimeException | java.sql.SQLException batchFailure) {
+                LOG.warnf("batched outcome handling failed (%s), applying one by one", batchFailure.getMessage());
+                for (var st : steps) sequential.add(byId.get(st.row().id()).get(0));
+            }
+            for (Outcome o : sequential) {
+                NotificationRow r = rows.get(o.notificationId());
                 try {
-                    NotificationRow updated = Tx.savepoint(c, cx -> engine.apply(cx, r, new Event.Outcome(o.attempt(), o.outcome(), o.reason(), o.occurredAt()), now));
+                    NotificationRow updated = Tx.savepoint(c, cx -> engine.apply(cx, r, event(o), now));
                     rows.put(r.id(), updated);
                     if (updated != r) applied++; else ignored++;
                 } catch (RuntimeException e) {

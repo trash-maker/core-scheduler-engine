@@ -44,6 +44,49 @@ public final class TimerRepository {
         }
     }
 
+    public record NewTimer(TimerKind kind, Instant due, String tenant, UUID notificationId, UUID seriesId, String ruleId, String key, JsonNode payload) {}
+
+    /** Batched insert (one round trip with reWriteBatchedInserts). */
+    public void insertAll(Connection c, List<NewTimer> timers) throws SQLException {
+        if (timers.isEmpty()) return;
+        try (PreparedStatement ps = c.prepareStatement("""
+                INSERT INTO timer (kind, due_at, tenant_id, notification_id, series_id, rule_id, correlation_key, payload)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?::jsonb)""")) {
+            Instant min = null;
+            for (NewTimer t : timers) {
+                ps.setString(1, t.kind().name());
+                Jdbc.setTs(ps, 2, t.due());
+                ps.setString(3, t.tenant());
+                ps.setObject(4, t.notificationId());
+                ps.setObject(5, t.seriesId());
+                ps.setString(6, t.ruleId());
+                ps.setString(7, t.key());
+                Jdbc.setJson(ps, 8, t.payload());
+                ps.addBatch();
+                if (min == null || t.due().isBefore(min)) min = t.due();
+            }
+            ps.executeBatch();
+            hint(min);
+        }
+    }
+
+    public void deleteByIds(Connection c, List<Long> ids) throws SQLException {
+        if (ids.isEmpty()) return;
+        try (PreparedStatement ps = c.prepareStatement("DELETE FROM timer WHERE id = ANY(?)")) {
+            ps.setArray(1, c.createArrayOf("bigint", ids.toArray()));
+            ps.executeUpdate();
+        }
+    }
+
+    public void deleteForNotifications(Connection c, List<UUID> ids, Set<TimerKind> kinds) throws SQLException {
+        if (ids.isEmpty()) return;
+        try (PreparedStatement ps = c.prepareStatement("DELETE FROM timer WHERE notification_id = ANY(?) AND kind = ANY(?)")) {
+            ps.setArray(1, Jdbc.uuidArray(c, ids));
+            ps.setArray(2, Jdbc.textArray(c, kinds.stream().map(Enum::name).toList()));
+            ps.executeUpdate();
+        }
+    }
+
     /** One RULE_EVAL timer per (tenant, rule, key): moved to the new instant. */
     public void upsertRuleEval(Connection c, String tenant, String ruleId, String key, Instant due, JsonNode payload) throws SQLException {
         try (PreparedStatement ps = c.prepareStatement("""
@@ -75,6 +118,39 @@ public final class TimerRepository {
             Jdbc.setJson(ps, 4, payload);
             ps.executeUpdate();
             hint(due);
+        }
+    }
+
+    public void upsertRuleEvalAll(Connection c, List<NewTimer> timers) throws SQLException {
+        if (timers.isEmpty()) return;
+        try (PreparedStatement ps = c.prepareStatement("""
+                INSERT INTO timer (kind, due_at, tenant_id, rule_id, correlation_key, payload)
+                VALUES ('RULE_EVAL', ?, ?, ?, ?, NULL)
+                ON CONFLICT (tenant_id, rule_id, correlation_key) WHERE kind = 'RULE_EVAL'
+                DO UPDATE SET due_at = excluded.due_at, failures = 0, last_error = NULL""")) {
+            Instant min = null;
+            for (NewTimer t : timers) {
+                Jdbc.setTs(ps, 1, t.due());
+                ps.setString(2, t.tenant());
+                ps.setString(3, t.ruleId());
+                ps.setString(4, t.key());
+                ps.addBatch();
+                if (min == null || t.due().isBefore(min)) min = t.due();
+            }
+            ps.executeBatch();
+            hint(min);
+        }
+    }
+
+    public void deleteRuleEvalAll(Connection c, List<String[]> tenantRuleKey) throws SQLException {
+        if (tenantRuleKey.isEmpty()) return;
+        try (PreparedStatement ps = c.prepareStatement("""
+                DELETE FROM timer t USING unnest(?::text[], ?::text[], ?::text[]) AS x(tn, r, k)
+                WHERE t.kind = 'RULE_EVAL' AND t.tenant_id = x.tn AND t.rule_id = x.r AND t.correlation_key = x.k""")) {
+            ps.setArray(1, c.createArrayOf("text", tenantRuleKey.stream().map(a -> a[0]).toArray()));
+            ps.setArray(2, c.createArrayOf("text", tenantRuleKey.stream().map(a -> a[1]).toArray()));
+            ps.setArray(3, c.createArrayOf("text", tenantRuleKey.stream().map(a -> a[2]).toArray()));
+            ps.executeUpdate();
         }
     }
 

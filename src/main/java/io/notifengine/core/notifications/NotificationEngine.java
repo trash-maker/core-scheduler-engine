@@ -88,52 +88,82 @@ public final class NotificationEngine {
 
     public record Created(List<UUID> notifications, List<UUID> series, int duplicates) {}
 
+    /** One rule firing to persist. */
+    public record Firing(CompiledRule rule, String tenant, String key, FiringPlanner.Plan plan) {}
+
     /** Persists a firing plan (all-or-nothing within the caller's transaction / savepoint). */
     public Created create(Connection c, CompiledRule rule, String tenant, String key, FiringPlanner.Plan plan, Instant now) throws SQLException {
+        return createAll(c, List.of(new Firing(rule, tenant, key, plan)), now);
+    }
+
+    /**
+     * Persists many firings with set-based statements: bulk idempotency claim, initial transitions computed in memory,
+     * then one batched insert each for notifications, history, timers and outbox.
+     */
+    public Created createAll(Connection c, List<Firing> firings, Instant now) throws SQLException {
         Instant createdAt = Uuid7.truncate(now);
-        Map<String, UUID> ids = new HashMap<>();
-        for (FiringPlanner.PlannedNotification p : plan.notifications()) ids.put(p.templateId(), Uuid7.generate(createdAt));
-        List<NotificationRow> rows = new ArrayList<>();
-        int dup = 0;
-        ObjectNode frozen = plan.context().toJson();
-        for (FiringPlanner.PlannedNotification p : plan.notifications()) {
-            UUID id = ids.get(p.templateId());
-            if (!notifs.claimIdempotencyKey(c, p.idempotencyKey(), id, now)) { dup++; continue; }
-            ObjectNode spec = p.spec().deepCopy();
-            List<TemplateDef> kids = rule.children().getOrDefault(p.templateId(), List.of());
-            spec.put("hasChildren", kids.stream().anyMatch(k -> !k.isWhileInState()));
-            spec.put("hasWhileChildren", kids.stream().anyMatch(TemplateDef::isWhileInState));
-            boolean needsContext = p.initialStatus() == NotificationStatus.WAITING_ON_PARENT;
-            rows.add(new NotificationRow(id, createdAt, now, tenant, rule.id(), rule.version(), p.templateId(), key, p.action(),
-                    p.type().name(), p.initialStatus(), null, 0, 0, p.retryPolicy(), p.body(), spec, needsContext ? frozen : null,
-                    p.dueAt(), p.expiresAt(), null, 0, p.idempotencyKey(),
-                    p.parentTemplateId() == null ? null : ids.get(p.parentTemplateId()),
-                    p.parentTrigger() == null ? null : p.parentTrigger().name(), p.depth(), null, null, p.cancelOn(),
-                    false, null, null, null));
+        List<Map<String, UUID>> idsPerFiring = new ArrayList<>();
+        List<String> keys = new ArrayList<>();
+        List<UUID> keyIds = new ArrayList<>();
+        for (Firing f : firings) {
+            Map<String, UUID> ids = new HashMap<>();
+            for (FiringPlanner.PlannedNotification p : f.plan().notifications()) {
+                UUID id = Uuid7.generate(createdAt);
+                ids.put(p.templateId(), id);
+                keys.add(p.idempotencyKey());
+                keyIds.add(id);
+            }
+            idsPerFiring.add(ids);
         }
-        notifs.insert(c, rows);
-        for (NotificationRow r : rows) {
-            notifs.history(c, r, List.of(new StatusChange(null, r.status(), "CREATE", 0, null)), now);
-            metrics.count("notifications.created", "action", r.action());
-        }
+        java.util.Set<String> claimed = notifs.claimIdempotencyKeys(c, keys, keyIds, now);
+        Writes w = new Writes();
+        List<UUID> created = new ArrayList<>();
         List<UUID> seriesIds = new ArrayList<>();
-        for (FiringPlanner.PlannedSeries ps : plan.series()) {
-            UUID sid = Uuid7.generate(createdAt);
-            UUID parentId = ps.parentTemplateId() == null ? null : ids.get(ps.parentTemplateId());
-            if (ps.parentTemplateId() != null && parentId == null) continue; // parent deduplicated
-            SeriesRow s = new SeriesRow(sid, tenant, rule.id(), rule.version(), ps.templateId(), key, ps.action(),
-                    ps.waiting() ? SeriesRow.WAITING : SeriesRow.ACTIVE, null, parentId, ps.spec(), frozen, ps.startAt(), ps.untilAt(),
-                    ps.maxOccurrences(), 0, 0, ps.firstDueAt(), ps.cancelOn(), ps.idempotencyKey(), 0, now, now);
-            if (!series.insert(c, s)) { dup++; continue; }
-            seriesIds.add(sid);
-            if (!ps.waiting()) scheduleFirstOccurrence(c, s, now);
+        int dup = 0;
+        for (int fi = 0; fi < firings.size(); fi++) {
+            Firing f = firings.get(fi);
+            CompiledRule rule = f.rule();
+            Map<String, UUID> ids = idsPerFiring.get(fi);
+            ObjectNode frozen = f.plan().context().toJson();
+            for (FiringPlanner.PlannedNotification p : f.plan().notifications()) {
+                if (!claimed.contains(p.idempotencyKey())) { dup++; ids.remove(p.templateId()); continue; }
+                UUID id = ids.get(p.templateId());
+                ObjectNode spec = p.spec().deepCopy();
+                List<TemplateDef> kids = rule.children().getOrDefault(p.templateId(), List.of());
+                spec.put("hasChildren", kids.stream().anyMatch(k -> !k.isWhileInState()));
+                spec.put("hasWhileChildren", kids.stream().anyMatch(TemplateDef::isWhileInState));
+                boolean needsContext = p.initialStatus() == NotificationStatus.WAITING_ON_PARENT;
+                NotificationRow row = new NotificationRow(id, createdAt, now, f.tenant(), rule.id(), rule.version(), p.templateId(), f.key(), p.action(),
+                        p.type().name(), p.initialStatus(), null, 0, 0, p.retryPolicy(), p.body(), spec, needsContext ? frozen : null,
+                        p.dueAt(), p.expiresAt(), null, 0, p.idempotencyKey(),
+                        p.parentTemplateId() == null ? null : ids.get(p.parentTemplateId()),
+                        p.parentTrigger() == null ? null : p.parentTrigger().name(), p.depth(), null, null, p.cancelOn(),
+                        false, null, null, null);
+                w.history.add(new NotificationRepository.HistoryRow(row, new StatusChange(null, row.status(), "CREATE", 0, null)));
+                metrics.count("notifications.created", "action", row.action());
+                if (row.status() == NotificationStatus.CREATED) {
+                    Transition t = sm.apply(row.toState(), new Event.Start(), now);
+                    NotificationRow started = row.withState(t.state(), now);
+                    w.transition(row, started, t, now);
+                    w.inserts.add(started);
+                } else w.inserts.add(row);
+                created.add(id);
+            }
+            for (FiringPlanner.PlannedSeries ps : f.plan().series()) {
+                UUID sid = Uuid7.generate(createdAt);
+                UUID parentId = ps.parentTemplateId() == null ? null : ids.get(ps.parentTemplateId());
+                if (ps.parentTemplateId() != null && parentId == null) continue; // parent deduplicated
+                SeriesRow sr = new SeriesRow(sid, f.tenant(), rule.id(), rule.version(), ps.templateId(), f.key(), ps.action(),
+                        ps.waiting() ? SeriesRow.WAITING : SeriesRow.ACTIVE, null, parentId, ps.spec(), frozen, ps.startAt(), ps.untilAt(),
+                        ps.maxOccurrences(), 0, 0, ps.firstDueAt(), ps.cancelOn(), ps.idempotencyKey(), 0, now, now);
+                if (!series.insert(c, sr)) { dup++; continue; }
+                seriesIds.add(sid);
+                if (!ps.waiting()) scheduleFirstOccurrence(c, sr, now);
+            }
         }
-        // start root notifications (children wait for their parent)
-        for (NotificationRow r : rows) {
-            if (r.status() == NotificationStatus.CREATED) apply(c, r, new Event.Start(), now);
-        }
+        w.flush(c, now);
         if (dup > 0) metrics.count("notifications.duplicates_suppressed", dup);
-        return new Created(rows.stream().map(NotificationRow::id).toList(), seriesIds, dup);
+        return new Created(created, seriesIds, dup);
     }
 
     private void scheduleFirstOccurrence(Connection c, SeriesRow s, Instant now) throws SQLException {
@@ -150,38 +180,84 @@ public final class NotificationEngine {
 
     /** Applies an event; persists state, history and effects; coordinates children. Returns the updated row. */
     public NotificationRow apply(Connection c, NotificationRow n, Event e, Instant now) throws SQLException {
-        Transition t = sm.apply(n.toState(), e, now);
-        if (t.isIgnored()) {
-            metrics.count("notifications.events_ignored", "event", e.name().startsWith("OUTCOME") ? "OUTCOME" : e.name());
-            LOG.debugf("notification %s: %s ignored: %s", n.id(), e.name(), t.ignored());
-            return n;
+        return applyAll(c, List.of(new Step(n, e)), now).get(0);
+    }
+
+    public record Step(NotificationRow row, Event event) {}
+
+    /**
+     * Applies one event to each of several DISTINCT notifications: transitions computed in memory, then one batched
+     * statement each for updates, history, timer deletes/inserts and outbox rows. Returns the rows after the event.
+     */
+    public List<NotificationRow> applyAll(Connection c, List<Step> steps, Instant now) throws SQLException {
+        Writes w = new Writes();
+        List<NotificationRow> out = new ArrayList<>(steps.size());
+        for (Step st : steps) {
+            NotificationRow n = st.row();
+            Transition t = sm.apply(n.toState(), st.event(), now);
+            if (t.isIgnored()) {
+                metrics.count("notifications.events_ignored", "event", st.event().name().startsWith("OUTCOME") ? "OUTCOME" : st.event().name());
+                LOG.debugf("notification %s: %s ignored: %s", n.id(), st.event().name(), t.ignored());
+                out.add(n);
+                continue;
+            }
+            NotificationRow row = n.withState(t.state(), now);
+            w.transition(n, row, t, now);
+            w.updates.add(row);
+            out.add(row.withVersion(row.version() + 1));
         }
-        NotificationStatus before = n.status();
-        NotificationRow row = n.withState(t.state(), now);
-        for (Effect ef : t.effects()) {
-            switch (ef) {
-                case Effect.ScheduleTimer st -> timers.insert(c, st.kind(), st.dueAt(), row.tenantId(), row.id(), null, row.ruleId(),
-                        row.correlationKey(), null);
-                case Effect.CancelTimers ct -> {
-                    if (ct.kinds().equals(EnumSet.of(TimerKind.ATTEMPT_TIMEOUT)) && n.attemptTimerId() != null) timers.deleteById(c, n.attemptTimerId());
-                    else timers.deleteForNotification(c, row.id(), ct.kinds());
-                }
-                case Effect.Emit em -> {
-                    outbox.insert(c, cfg.outputTopic(), MessageFactory.key(row), MessageFactory.headers(row, em.attempt(), trace.currentHeaders()),
-                            MessageFactory.payload(row, em.attempt(), now), row.tenantId(), row.id(), em.attempt(),
-                            em.attemptTimeout() == null ? null : em.attemptTimeout().toMillis(), now);
-                    if (em.attempt() > 1) metrics.count("notifications.retries", "action", row.action());
+        w.flush(c, now);
+        return out;
+    }
+
+    /** Collects the writes of many transitions and flushes them with batched statements. */
+    private final class Writes {
+        final List<NotificationRow> inserts = new ArrayList<>();
+        final List<NotificationRow> updates = new ArrayList<>();
+        final List<NotificationRepository.HistoryRow> history = new ArrayList<>();
+        final List<TimerRepository.NewTimer> newTimers = new ArrayList<>();
+        final List<Long> deleteTimerIds = new ArrayList<>();
+        final Map<Set<TimerKind>, List<UUID>> deleteTimerKinds = new HashMap<>();
+        final List<OutboxRepository.NewMessage> messages = new ArrayList<>();
+        final List<Object[]> coordinate = new ArrayList<>();
+
+        void transition(NotificationRow before, NotificationRow row, Transition t, Instant now) {
+            for (Effect ef : t.effects()) {
+                switch (ef) {
+                    case Effect.ScheduleTimer st -> newTimers.add(new TimerRepository.NewTimer(st.kind(), st.dueAt(), row.tenantId(), row.id(), null,
+                            row.ruleId(), row.correlationKey(), null));
+                    case Effect.CancelTimers ct -> {
+                        if (ct.kinds().equals(EnumSet.of(TimerKind.ATTEMPT_TIMEOUT)) && before.attemptTimerId() != null) deleteTimerIds.add(before.attemptTimerId());
+                        else deleteTimerKinds.computeIfAbsent(ct.kinds(), k -> new ArrayList<>()).add(row.id());
+                    }
+                    case Effect.Emit em -> {
+                        messages.add(new OutboxRepository.NewMessage(cfg.outputTopic(), MessageFactory.key(row),
+                                MessageFactory.headers(row, em.attempt(), trace.currentHeaders()), MessageFactory.payload(row, em.attempt(), now),
+                                row.tenantId(), row.id(), em.attempt(), em.attemptTimeout() == null ? null : em.attemptTimeout().toMillis()));
+                        if (em.attempt() > 1) metrics.count("notifications.retries", "action", row.action());
+                    }
                 }
             }
+            for (StatusChange ch : t.changes()) {
+                history.add(new NotificationRepository.HistoryRow(row, ch));
+                metrics.count("notifications.transitions", "to", ch.to().name(), "action", row.action());
+                if (ch.to() == NotificationStatus.RETRIES_EXHAUSTED) metrics.count("notifications.exhausted", "action", row.action());
+            }
+            JsonNode spec = row.spec();
+            if (t.changed() && (spec.path("hasChildren").asBoolean(false) || spec.path("hasWhileChildren").asBoolean(false)))
+                coordinate.add(new Object[]{row, t, before.status()});
         }
-        row = notifs.update(c, row);
-        notifs.history(c, row, t.changes(), now);
-        for (StatusChange ch : t.changes()) {
-            metrics.count("notifications.transitions", "to", ch.to().name(), "action", row.action());
-            if (ch.to() == NotificationStatus.RETRIES_EXHAUSTED) metrics.count("notifications.exhausted", "action", row.action());
+
+        void flush(Connection c, Instant now) throws SQLException {
+            notifs.insert(c, inserts);
+            notifs.updateAll(c, updates);
+            notifs.historyAll(c, history, now);
+            timers.deleteByIds(c, deleteTimerIds);
+            for (var e : deleteTimerKinds.entrySet()) timers.deleteForNotifications(c, e.getValue(), e.getKey());
+            timers.insertAll(c, newTimers);
+            outbox.insertAll(c, messages, now);
+            for (Object[] x : coordinate) coordinate(c, (NotificationRow) x[0], (Transition) x[1], (NotificationStatus) x[2], now);
         }
-        coordinate(c, row, t, before, now);
-        return row;
     }
 
     // =====================================================================================================

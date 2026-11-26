@@ -105,6 +105,79 @@ public final class NotificationRepository {
         return r.withVersion(r.version() + 1);
     }
 
+    /** Batched optimistic update (one round trip). Returns rows with incremented versions. */
+    public List<NotificationRow> updateAll(Connection c, List<NotificationRow> rows) throws SQLException {
+        if (rows.isEmpty()) return List.of();
+        try (PreparedStatement ps = c.prepareStatement("""
+                UPDATE notification SET updated_at=?, status=?, status_reason=?, attempt=?, cycle_attempts=?, body=?::jsonb,
+                  due_at=?, expires_at=?, attempt_timer_id=?, failed_once=?, last_failure=?::jsonb, published_at=?, terminal_at=?,
+                  version = version + 1
+                WHERE id=? AND created_at=? AND version=?""")) {
+            for (NotificationRow r : rows) {
+                int i = 1;
+                Jdbc.setTs(ps, i++, r.updatedAt());
+                ps.setString(i++, r.status().name());
+                ps.setString(i++, r.statusReason());
+                ps.setInt(i++, r.attempt());
+                ps.setInt(i++, r.cycleAttempts());
+                Jdbc.setJson(ps, i++, r.body());
+                Jdbc.setTs(ps, i++, r.dueAt());
+                Jdbc.setTs(ps, i++, r.expiresAt());
+                Jdbc.setLong(ps, i++, r.attemptTimerId());
+                ps.setBoolean(i++, r.failedOnce());
+                Jdbc.setJson(ps, i++, r.lastFailure() == null ? null : r.lastFailure().toJson());
+                Jdbc.setTs(ps, i++, r.publishedAt());
+                Jdbc.setTs(ps, i++, r.terminalAt());
+                ps.setObject(i++, r.id());
+                Jdbc.setTs(ps, i++, r.createdAt());
+                ps.setInt(i, r.version());
+                ps.addBatch();
+            }
+            int[] counts = ps.executeBatch();
+            for (int k = 0; k < counts.length; k++) if (counts[k] != 1) throw new ConcurrentUpdateException(rows.get(k).id());
+        }
+        return rows.stream().map(r -> r.withVersion(r.version() + 1)).toList();
+    }
+
+    public record HistoryRow(NotificationRow n, StatusChange change) {}
+
+    public void historyAll(Connection c, List<HistoryRow> rows, Instant now) throws SQLException {
+        if (rows.isEmpty()) return;
+        try (PreparedStatement ps = c.prepareStatement("""
+                INSERT INTO notification_history (notification_id, notification_created_at, tenant_id, at, from_status, to_status, event, attempt, reason)
+                VALUES (?,?,?,?,?,?,?,?,?)""")) {
+            for (HistoryRow h : rows) {
+                StatusChange ch = h.change();
+                ps.setObject(1, h.n().id());
+                Jdbc.setTs(ps, 2, h.n().createdAt());
+                ps.setString(3, h.n().tenantId());
+                Jdbc.setTs(ps, 4, now);
+                ps.setString(5, ch.from() == null ? null : ch.from().name());
+                ps.setString(6, ch.to().name());
+                ps.setString(7, ch.event());
+                ps.setInt(8, ch.attempt());
+                ps.setString(9, ch.reason() == null ? null : ch.reason().length() > 500 ? ch.reason().substring(0, 500) : ch.reason());
+                ps.addBatch();
+            }
+            ps.executeBatch();
+        }
+    }
+
+    /** Bulk idempotency claim; returns the keys that were new. */
+    public java.util.Set<String> claimIdempotencyKeys(Connection c, List<String> keys, List<UUID> ids, Instant now) throws SQLException {
+        java.util.Set<String> out = new java.util.HashSet<>();
+        if (keys.isEmpty()) return out;
+        try (PreparedStatement ps = c.prepareStatement("""
+                INSERT INTO notification_dedup (idempotency_key, notification_id, created_at)
+                SELECT k, i, ? FROM unnest(?::text[], ?::uuid[]) AS x(k, i) ON CONFLICT DO NOTHING RETURNING idempotency_key""")) {
+            Jdbc.setTs(ps, 1, now);
+            ps.setArray(2, Jdbc.textArray(c, keys));
+            ps.setArray(3, Jdbc.uuidArray(c, ids));
+            try (ResultSet rs = ps.executeQuery()) { while (rs.next()) out.add(rs.getString(1)); }
+        }
+        return out;
+    }
+
     /** Arms the attempt-timeout timer reference if the attempt is still the published one. */
     public int setAttemptTimer(Connection c, UUID id, int attempt, long timerId) throws SQLException {
         try (PreparedStatement ps = c.prepareStatement(

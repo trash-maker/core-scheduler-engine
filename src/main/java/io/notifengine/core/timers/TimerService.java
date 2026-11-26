@@ -20,7 +20,13 @@ import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import io.notifengine.domain.notification.TimerKind;
+import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.UUID;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -70,27 +76,72 @@ public final class TimerService {
             List<TimerRow> batch = timers.claim(c, now, cfg.timerBatchSize());
             // consistent lock order across workers (deadlock avoidance)
             batch.sort(Comparator.comparing(TimerService::lockKey));
-            for (TimerRow t : batch) {
+            for (TimerRow t : batch)
                 metrics.recordMs("timers.lag", Math.max(0, Duration.between(t.dueAt(), now).toMillis()), "kind", t.kind().name());
+            List<TimerRow> notifTimers = batch.stream().filter(t -> NOTIFICATION_KINDS.contains(t.kind())).toList();
+            List<TimerRow> others = new ArrayList<>(batch.stream().filter(t -> !NOTIFICATION_KINDS.contains(t.kind())).toList());
+            if (!notifTimers.isEmpty()) {
                 try {
-                    Tx.savepoint(c, cx -> { faults.before(t); handle(cx, t, now); return null; });
-                    metrics.count("timers.fired", "kind", t.kind().name());
+                    Tx.savepoint(c, cx -> { notificationTimers(cx, notifTimers, now); return null; });
+                    for (TimerRow t : notifTimers) metrics.count("timers.fired", "kind", t.kind().name());
                 } catch (RuntimeException | SQLException e) {
-                    String err = e.getClass().getSimpleName() + ": " + e.getMessage();
-                    metrics.count("timers.failed", "kind", t.kind().name());
-                    if (t.failures() + 1 >= cfg.timerMaxFailures()) {
-                        LOG.errorf("timer %d (%s) moved to timer_dead after %d failures: %s", t.id(), t.kind(), t.failures() + 1, err);
-                        timers.dead(c, t, err, now);
-                        metrics.count("timers.dead", "kind", t.kind().name());
-                    } else {
-                        long backoff = cfg.timerFailureBackoff().toMillis() * (1L << Math.min(t.failures(), 10));
-                        LOG.warnf("timer %d (%s) failed (%d), retry in %d ms: %s", t.id(), t.kind(), t.failures() + 1, backoff, err);
-                        timers.reschedule(c, t, now.plusMillis(backoff), err);
-                    }
+                    LOG.debugf("batched timer handling failed (%s), isolating per timer", e.getMessage());
+                    others.addAll(0, notifTimers);
                 }
             }
+            for (TimerRow t : others) single(c, t, now);
             return batch.size();
         });
+    }
+
+    private static final Set<TimerKind> NOTIFICATION_KINDS = EnumSet.of(TimerKind.PUBLISH, TimerKind.EXPIRE, TimerKind.ATTEMPT_TIMEOUT);
+
+    /** Handles one timer under its own savepoint; failures are re-queued with backoff or dead-lettered. */
+    private void single(Connection c, TimerRow t, Instant now) throws SQLException {
+        try {
+            Tx.savepoint(c, cx -> { faults.before(t); handle(cx, t, now); return null; });
+            metrics.count("timers.fired", "kind", t.kind().name());
+        } catch (RuntimeException | SQLException e) {
+            String err = e.getClass().getSimpleName() + ": " + e.getMessage();
+            metrics.count("timers.failed", "kind", t.kind().name());
+            if (t.failures() + 1 >= cfg.timerMaxFailures()) {
+                LOG.errorf("timer %d (%s) moved to timer_dead after %d failures: %s", t.id(), t.kind(), t.failures() + 1, err);
+                timers.dead(c, t, err, now);
+                metrics.count("timers.dead", "kind", t.kind().name());
+            } else {
+                long backoff = cfg.timerFailureBackoff().toMillis() * (1L << Math.min(t.failures(), 10));
+                LOG.warnf("timer %d (%s) failed (%d), retry in %d ms: %s", t.id(), t.kind(), t.failures() + 1, backoff, err);
+                timers.reschedule(c, t, now.plusMillis(backoff), err);
+            }
+        }
+    }
+
+    /** Fast path: lock all target notifications at once and apply the events with batched writes. */
+    private void notificationTimers(Connection c, List<TimerRow> list, Instant now) throws SQLException {
+        for (TimerRow t : list) faults.before(t);
+        Map<UUID, NotificationRow> rows = new HashMap<>();
+        for (NotificationRow r : engine.repository().lockMany(c, list.stream().map(TimerRow::notificationId).toList())) rows.put(r.id(), r);
+        Map<UUID, List<TimerRow>> byNotification = new LinkedHashMap<>();
+        for (TimerRow t : list) byNotification.computeIfAbsent(t.notificationId(), k -> new ArrayList<>()).add(t);
+        List<NotificationEngine.Step> steps = new ArrayList<>();
+        List<TimerRow> sequential = new ArrayList<>();
+        for (var e : byNotification.entrySet()) {
+            NotificationRow r = rows.get(e.getKey());
+            if (r == null) continue; // removed by retention
+            if (e.getValue().size() == 1) steps.add(new NotificationEngine.Step(r, event(e.getValue().get(0))));
+            else sequential.addAll(e.getValue());
+        }
+        engine.applyAll(c, steps, now);
+        for (TimerRow t : sequential) handle(c, t, now);
+    }
+
+    private static Event event(TimerRow t) {
+        return switch (t.kind()) {
+            case PUBLISH -> new Event.PublishDue();
+            case EXPIRE -> new Event.Expire();
+            case ATTEMPT_TIMEOUT -> new Event.AttemptTimeout(t.payload().path("attempt").asInt());
+            default -> throw new IllegalArgumentException(t.kind().name());
+        };
     }
 
     private static String lockKey(TimerRow t) {
@@ -130,9 +181,11 @@ public final class TimerService {
         var entities = keys.stream().map(k -> new SignalStore.EntityKey(rule.tenantId(), k)).toList();
         Map<SignalStore.EntityKey, Map<String, io.notifengine.domain.signal.SignalValue>> sig = signals.load(c, entities);
         var locked = evaluation.states().lockAll(c, keys.stream().map(k -> new RuleStateRepository.Key(rule.tenantId(), rule.id(), k)).toList());
+        EvaluationService.Buffer buf = new EvaluationService.Buffer();
         for (SignalStore.EntityKey e : entities) {
-            evaluation.evaluate(c, new EvaluationService.EntityWork(e.tenantId(), e.correlationKey(), sig.get(e), null, null, List.of(rule)), locked, now);
+            evaluation.evaluateInto(new EvaluationService.EntityWork(e.tenantId(), e.correlationKey(), sig.get(e), null, null, List.of(rule)), locked, now, buf);
         }
+        evaluation.flush(c, buf, now);
         metrics.count("evaluation.time_triggered", keys.size());
     }
 

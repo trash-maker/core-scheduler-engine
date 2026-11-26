@@ -41,6 +41,32 @@ public final class OutboxRepository {
         }
     }
 
+    public record NewMessage(String topic, String key, Map<String, String> headers, String payload, String tenant, UUID notificationId,
+                             Integer attempt, Long timeoutMs) {}
+
+    public void insertAll(Connection c, List<NewMessage> msgs, Instant now) throws SQLException {
+        if (msgs.isEmpty()) return;
+        try (PreparedStatement ps = c.prepareStatement("""
+                INSERT INTO outbox (topic, kafka_key, headers, payload, tenant_id, notification_id, attempt, attempt_timeout_ms, created_at)
+                VALUES (?,?,?::jsonb,?,?,?,?,?,?)""")) {
+            for (NewMessage m : msgs) {
+                ObjectNode h = Json.object();
+                m.headers().forEach(h::put);
+                ps.setString(1, m.topic());
+                ps.setString(2, m.key());
+                Jdbc.setJson(ps, 3, h);
+                ps.setString(4, m.payload());
+                ps.setString(5, m.tenant());
+                ps.setObject(6, m.notificationId());
+                Jdbc.setInt(ps, 7, m.attempt());
+                Jdbc.setLong(ps, 8, m.timeoutMs());
+                Jdbc.setTs(ps, 9, now);
+                ps.addBatch();
+            }
+            ps.executeBatch();
+        }
+    }
+
     public List<OutboxRow> claim(Connection c, int limit) throws SQLException {
         try (PreparedStatement ps = c.prepareStatement("SELECT * FROM outbox ORDER BY id LIMIT ? FOR UPDATE SKIP LOCKED")) {
             ps.setInt(1, limit);

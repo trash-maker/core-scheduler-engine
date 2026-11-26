@@ -2,7 +2,6 @@ package io.notifengine.core.evaluation;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.notifengine.core.EngineConfig;
-import io.notifengine.core.db.Tx;
 import io.notifengine.core.dispatch.DeadLetters;
 import io.notifengine.core.notifications.NotificationEngine;
 import io.notifengine.core.ports.EngineMetrics;
@@ -11,7 +10,6 @@ import io.notifengine.domain.body.BodySchemaValidator;
 import io.notifengine.domain.evaluation.RuleEvaluation;
 import io.notifengine.domain.rule.CompiledRule;
 import io.notifengine.domain.signal.SignalValue;
-import org.jboss.logging.Logger;
 
 import java.sql.Connection;
 import java.sql.SQLException;
@@ -25,7 +23,6 @@ import java.util.Map;
  * Persists the new rule state, creates notifications on an edge, and maintains the per-entity RULE_EVAL timer.
  */
 public final class EvaluationService {
-    private static final Logger LOG = Logger.getLogger(EvaluationService.class);
 
     private final RuleStateRepository states;
     private final NotificationEngine engine;
@@ -52,9 +49,27 @@ public final class EvaluationService {
     public record EntityWork(String tenantId, String correlationKey, Map<String, SignalValue> signals, JsonNode trigger,
                              String triggerPayload, List<CompiledRule> rules) {}
 
-    public int evaluate(Connection c, EntityWork w, Map<RuleStateRepository.Key, RuleStateRepository.State> locked, Instant now) throws SQLException {
-        List<RuleStateRepository.State> updates = new ArrayList<>();
-        int fired = 0;
+    /** Writes produced by evaluations, flushed with batched statements. */
+    public static final class Buffer {
+        final List<RuleStateRepository.State> states = new ArrayList<>();
+        final List<TimerRepository.NewTimer> ruleEvalUpserts = new ArrayList<>();
+        final List<String[]> ruleEvalDeletes = new ArrayList<>();
+        final List<NotificationEngine.Firing> firings = new ArrayList<>();
+        final List<String[]> deadLetters = new ArrayList<>();
+
+        public void addAll(Buffer o) {
+            states.addAll(o.states);
+            ruleEvalUpserts.addAll(o.ruleEvalUpserts);
+            ruleEvalDeletes.addAll(o.ruleEvalDeletes);
+            firings.addAll(o.firings);
+            deadLetters.addAll(o.deadLetters);
+        }
+
+        public int firings() { return firings.size(); }
+    }
+
+    /** Evaluates the rules of one entity in memory (no I/O); writes go to {@code buf}. */
+    public void evaluateInto(EntityWork w, Map<RuleStateRepository.Key, RuleStateRepository.State> locked, Instant now, Buffer buf) {
         for (CompiledRule rule : w.rules()) {
             RuleStateRepository.Key key = new RuleStateRepository.Key(w.tenantId(), rule.id(), w.correlationKey());
             RuleStateRepository.State st = locked.get(key);
@@ -65,32 +80,41 @@ public final class EvaluationService {
                     cfg.defaultSignalMaxAge(), schemas);
             metrics.recordMs("evaluation.time", (System.nanoTime() - t0) / 1_000_000);
             boolean fire = res.decision().fire();
-            updates.add(new RuleStateRepository.State(key, res.decision().newLastResult(), res.decision().newEdgeSeq(),
+            buf.states.add(new RuleStateRepository.State(key, res.decision().newLastResult(), res.decision().newEdgeSeq(),
                     fire ? now : st.lastFiredAt(), now, rule.version(), res.evaluation().memory()));
             if (fire) {
                 if (res.planningError() != null) {
                     metrics.count("rules.fire_failed", "reason", res.planningError().code());
-                    dlq.record(c, "rule-firing", w.tenantId(), res.planningError().code(),
+                    buf.deadLetters.add(new String[]{w.tenantId(), res.planningError().code(),
                             "rule " + rule.id() + " v" + rule.version() + " key " + w.correlationKey() + ": " + res.planningError().getMessage(),
-                            w.triggerPayload(), now);
+                            w.triggerPayload()});
                 } else {
-                    try {
-                        Tx.savepoint(c, cx -> engine.create(cx, rule, w.tenantId(), w.correlationKey(), res.plan(), now));
-                        fired++;
-                        metrics.count("rules.fired");
-                    } catch (RuntimeException e) {
-                        LOG.errorf(e, "creating notifications failed for rule %s key %s", rule.id(), w.correlationKey());
-                        dlq.record(c, "rule-firing", w.tenantId(), "CREATE_FAILED", "rule " + rule.id() + ": " + e.getMessage(), w.triggerPayload(), now);
-                    }
+                    buf.firings.add(new NotificationEngine.Firing(rule, w.tenantId(), w.correlationKey(), res.plan()));
+                    metrics.count("rules.fired");
                 }
             }
             if (rule.entityTimed()) {
                 if (res.evaluation().nextEntityChange() != null)
-                    timers.upsertRuleEval(c, w.tenantId(), rule.id(), w.correlationKey(), res.evaluation().nextEntityChange(), null);
-                else timers.deleteRuleEval(c, w.tenantId(), rule.id(), w.correlationKey());
+                    buf.ruleEvalUpserts.add(new TimerRepository.NewTimer(io.notifengine.domain.notification.TimerKind.RULE_EVAL,
+                            res.evaluation().nextEntityChange(), w.tenantId(), null, null, rule.id(), w.correlationKey(), null));
+                else buf.ruleEvalDeletes.add(new String[]{w.tenantId(), rule.id(), w.correlationKey()});
             }
         }
-        states.updateAll(c, updates);
-        return fired;
+    }
+
+    /** Persists a buffer: rule states, RULE_EVAL timers, dead letters and notifications, each with one batched statement. */
+    public int flush(Connection c, Buffer b, Instant now) throws SQLException {
+        states.updateAll(c, b.states);
+        timers.upsertRuleEvalAll(c, b.ruleEvalUpserts);
+        timers.deleteRuleEvalAll(c, b.ruleEvalDeletes);
+        for (String[] d : b.deadLetters) dlq.record(c, "rule-firing", d[0], d[1], d[2], d[3], now);
+        if (!b.firings.isEmpty()) engine.createAll(c, b.firings, now);
+        return b.firings.size();
+    }
+
+    public int evaluate(Connection c, EntityWork w, Map<RuleStateRepository.Key, RuleStateRepository.State> locked, Instant now) throws SQLException {
+        Buffer b = new Buffer();
+        evaluateInto(w, locked, now, b);
+        return flush(c, b, now);
     }
 }

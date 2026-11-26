@@ -137,17 +137,38 @@ public final class SignalIngestService {
             if (!rulesByEntity.isEmpty()) {
                 var signals = store.load(c, rulesByEntity.keySet());
                 var locked = evaluation.states().lockAll(c, lockKeys);
+                Map<SignalStore.EntityKey, EvaluationService.Buffer> buffers = new LinkedHashMap<>();
+                EvaluationService.Buffer all = new EvaluationService.Buffer();
                 for (var e : rulesByEntity.entrySet()) {
                     List<Parsed> causes = changedByEntity.get(e.getKey());
                     Parsed trigger = causes.stream().max((a, b) -> a.env().occurredAt().compareTo(b.env().occurredAt())).orElseThrow();
                     var work = new EvaluationService.EntityWork(e.getKey().tenantId(), e.getKey().correlationKey(), signals.get(e.getKey()),
                             trigger.env().toJson(), trigger.raw(), e.getValue());
+                    EvaluationService.Buffer b = new EvaluationService.Buffer();
                     try {
-                        fired += Tx.savepoint(c, cx -> evaluation.evaluate(cx, work, locked, now));
+                        evaluation.evaluateInto(work, locked, now, b);
+                        buffers.put(e.getKey(), b);
+                        all.addAll(b);
                     } catch (RuntimeException ex) {
                         LOG.errorf(ex, "evaluation failed for %s", e.getKey());
                         metrics.count("evaluation.failed");
                         for (Parsed p : causes) dlq.record(c, "signals.in", p.env().tenantId(), "EVALUATION_FAILED", ex.getMessage(), p.raw(), now);
+                    }
+                }
+                try {
+                    fired = Tx.savepoint(c, cx -> evaluation.flush(cx, all, now));
+                } catch (RuntimeException | java.sql.SQLException batchFailure) {
+                    // isolate the poison entity: retry entity by entity, dead-letter the failing ones
+                    LOG.warnf("batched flush failed (%s), retrying per entity", batchFailure.getMessage());
+                    for (var e : buffers.entrySet()) {
+                        try {
+                            fired += Tx.savepoint(c, cx -> evaluation.flush(cx, e.getValue(), now));
+                        } catch (RuntimeException | java.sql.SQLException ex) {
+                            LOG.errorf(ex, "persisting evaluation failed for %s", e.getKey());
+                            metrics.count("evaluation.failed");
+                            for (Parsed p : changedByEntity.get(e.getKey()))
+                                dlq.record(c, "signals.in", p.env().tenantId(), "EVALUATION_FAILED", ex.getMessage(), p.raw(), now);
+                        }
                     }
                 }
             }
