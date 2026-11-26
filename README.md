@@ -132,7 +132,7 @@ applies the state machine and flushes the effects (retry timer, children, series
 └── src/main/
     ├── resources/db/migration/V1__schema.sql   tables, partitioning function, indexes, autovacuum settings
     ├── resources/application.properties        service configuration (see reference below)
-    └── java/io/notifengine/
+    └── java/trash_maker/
         ├── common/        Uuid7, IsoAmount (ISO-8601 periods+durations), Json, ValidationError
         ├── domain/
         │   ├── signal/        Value (number|boolean|string|date), SignalEnvelope
@@ -152,7 +152,7 @@ applies the state machine and flushes the effects (retry timer, children, series
             ├── kafka/    SignalsConsumer, ResultsConsumer, KafkaMessagePublisher, FakeActuator
             ├── api/      RuleResource (CRUD, validate, dry-run, state), NotificationResource, OpsResource, TenantGuard
             └── ops/      Workers (virtual threads), Jobs (reload, partitions, retention, gauges), metrics, health
-src/test/java/io/notifengine/
+src/test/java/trash_maker/
     domain/  (truth tables, recurrence/DST, state machine, backoff, body, rule validation, dependency matrix, architecture)
     it/      FiringIntegrationTest, LifecycleIntegrationTest, ReliabilityIntegrationTest, EndToEndTest (@QuarkusTest + Kafka)
     load/    LoadTest (-Pload)
