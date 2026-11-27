@@ -26,27 +26,27 @@ Generated 2026-11-26T07:57:54.451397903Z on 4 vCPU; Quarkus app (roles timers,re
 
 # Load test report (Kafka)
 
-Generated 2026-11-26T08:01:40.910077798Z on 4 vCPU; Quarkus app (roles timers,relay; JTA transactions); PostgreSQL 16 (Testcontainers, fsync=off); broker: Kafka 3.8 (Testcontainers); timer workers 4, relays 2.
+Generated 2026-11-27T05:35:44.791964827Z on 4 vCPU; Quarkus app (roles timers,relay; JTA transactions); PostgreSQL 16 (Testcontainers, fsync=off); broker: Kafka 3.8 via SmallRye Emitter (relay-out channel) (Testcontainers); timer workers 4, relays 2.
 
 ## A. sustained 1000/s for 60s
 
 | metric | value |
 |---|---|
 | notifications created (SCHEDULED) | 60000 |
-| signal ingest | 180000 signals in 21.9 s = 8220 signals/s |
+| signal ingest | 180000 signals in 29.3 s = 6135 signals/s |
 | published | 60000 / 60000 |
 | publish throughput (first due -> last ack) | 999 msg/s |
-| timers.lag p50 / p95 / p99 / max (ms) | 1 / 4 / 8 / 83 |
-| publish lag due->ack p50 / p95 / p99 / max (ms) | 27 / 47 / 80 / 402 |
+| timers.lag p50 / p95 / p99 / max (ms) | 1 / 4 / 8 / 37 |
+| publish lag due->ack p50 / p95 / p99 / max (ms) | 27 / 48 / 152 / 499 |
 
 ## B. burst 30000 due at the same instant
 
 | metric | value |
 |---|---|
 | notifications created (SCHEDULED) | 30000 |
-| signal ingest | 90000 signals in 11.5 s = 7796 signals/s |
+| signal ingest | 90000 signals in 13.0 s = 6910 signals/s |
 | published | 30000 / 30000 |
-| publish throughput (first due -> last ack) | 9375 msg/s |
-| timers.lag p50 / p95 / p99 / max (ms) | 1546 / 2898 / 2997 / 3025 |
-| publish lag due->ack p50 / p95 / p99 / max (ms) | 1645 / 2968 / 3062 / 3100 |
+| publish throughput (first due -> last ack) | 6382 msg/s |
+| timers.lag p50 / p95 / p99 / max (ms) | 2187 / 4108 / 4309 / 4335 |
+| publish lag due->ack p50 / p95 / p99 / max (ms) | 2287 / 4281 / 4513 / 4540 |
 

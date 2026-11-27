@@ -8,7 +8,7 @@ scheduling, retries, expiry, recurring series and parent/child chains. PostgreSQ
 * Java 21 · Quarkus 3.33 LTS · PostgreSQL 16 · Kafka · plain JDBC · Flyway · Micrometer/Prometheus · OpenTelemetry · OIDC
 * Business logic in **pure functions** (`domain.*`), unit-tested without any framework; services, transactions (JTA) and
   adapters on Quarkus, integration-tested with `@QuarkusTest` against real PostgreSQL and Kafka (Testcontainers); a load test.
-* Measured at **1,000 publishes/s**: `timers.lag` p95 4 ms / p99 8 ms with Kafka. A burst drains at about 9,400 msg/s.
+* Measured at **1,000 publishes/s**: `timers.lag` p95 4 ms / p99 8 ms with Kafka. A burst drains at about 6,400 msg/s.
   See [load test](#load-test).
 
 ---
@@ -576,12 +576,13 @@ OpenAPI: `docs/openapi/openapi.yaml`, generated at build. It is also served live
 
 | scenario | broker | published | throughput | `timers.lag` p95 / p99 | due → Kafka ack p95 / p99 |
 |---|---|---|---|---|---|
-| sustained 1,000/s for 60 s | Kafka | 60,000 / 60,000 | 999 msg/s | **4 / 8 ms** | 47 / 80 ms |
+| sustained 1,000/s for 60 s | Kafka (SmallRye Emitter) | 60,000 / 60,000 | 999 msg/s | **4 / 8 ms** | 48 / 152 ms |
 | sustained 1,000/s for 60 s | in-memory | 60,000 / 60,000 | 999 msg/s | 3 / 5 ms | 30 / 35 ms |
-| burst: 30,000 due at the same instant | Kafka | 30,000 / 30,000 | **9,375 msg/s** drain | 2.9 / 3.0 s (queueing) | 3.0 / 3.1 s |
+| burst: 30,000 due at the same instant | Kafka (SmallRye Emitter) | 30,000 / 30,000 | **6,382 msg/s** drain | 4.1 / 4.3 s (queueing) | 4.3 / 4.5 s |
 | signal ingest (3 signals per entity, batches of 1,500) | – | – | ~7,800–8,500 signals/s, ~2,700 notifications created/s | – | – |
 
-The sustained rate leaves about 9× headroom before the drain limit. Precision stays well within the 1–2 s target.
+The sustained rate leaves about 6× headroom before the drain limit. Publishing through the SmallRye `Emitter` drains
+bursts about a third slower than the earlier hand-written producer (9,375 msg/s); sustained precision is unchanged. Precision stays well within the 1–2 s target.
 
 ---
 
