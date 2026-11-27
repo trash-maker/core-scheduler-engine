@@ -1,16 +1,16 @@
 package trash_maker.domain;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import trash_maker.common.Json;
-import trash_maker.common.ValidationError;
-import trash_maker.domain.body.BodyContext;
-import trash_maker.domain.body.BodyResolutionException;
-import trash_maker.domain.body.BodyResolver;
-import trash_maker.domain.rule.Enums.MissingValuePolicy;
-import trash_maker.domain.signal.SignalKind;
-import trash_maker.domain.signal.SignalValue;
-import trash_maker.domain.signal.Value;
 import org.junit.jupiter.api.Test;
+import trash_maker.common.Json;
+import trash_maker.common.Validation.ValidationError;
+import trash_maker.domain.body.BodyResolver.BodyContext;
+import trash_maker.domain.body.BodyResolver.BodyResolutionException;
+import trash_maker.domain.body.BodyResolver;
+import trash_maker.domain.rule.Rule.Enums.MissingValuePolicy;
+import trash_maker.domain.signal.Signals.SignalKind;
+import trash_maker.domain.signal.Signals.SignalValue;
+import trash_maker.domain.signal.Signals.Value;
 
 import java.math.BigDecimal;
 import java.time.Instant;

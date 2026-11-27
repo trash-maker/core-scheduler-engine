@@ -1,8 +1,8 @@
 package trash_maker.domain;
 
 import org.junit.jupiter.api.Test;
-import trash_maker.domain.timer.SweepStep;
-import trash_maker.domain.timer.TimerFailurePolicy;
+import trash_maker.domain.scheduling.SchedulingPolicies.SweepStep;
+import trash_maker.domain.scheduling.SchedulingPolicies.TimerFailurePolicy;
 
 import java.time.Duration;
 import java.time.Instant;

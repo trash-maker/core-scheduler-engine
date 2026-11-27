@@ -1,12 +1,8 @@
 package trash_maker.it;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import trash_maker.common.Json;
-import trash_maker.support.Containers;
-import trash_maker.support.EndToEndProfile;
-import trash_maker.support.Fx;
-import io.quarkus.test.junit.TestProfile;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.TestProfile;
 import io.quarkus.test.security.TestSecurity;
 import io.restassured.http.ContentType;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -16,6 +12,10 @@ import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.junit.jupiter.api.Test;
+import trash_maker.common.Json;
+import trash_maker.support.Containers;
+import trash_maker.support.EndToEndProfile;
+import trash_maker.support.Fx;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -28,9 +28,9 @@ import java.util.UUID;
 import static io.restassured.RestAssured.given;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
-import static org.hamcrest.Matchers.containsString;
 
 /** Full stack: REST rule CRUD -> Kafka signals.in -> evaluation -> outbox -> notifications.out -> results -> SUCCEEDED. */
 @QuarkusTest

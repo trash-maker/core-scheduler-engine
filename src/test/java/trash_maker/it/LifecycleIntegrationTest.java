@@ -1,31 +1,30 @@
 package trash_maker.it;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
-import trash_maker.support.CoreProfile;
-
-import com.fasterxml.jackson.databind.JsonNode;
+import org.junit.jupiter.api.Test;
 import trash_maker.common.Json;
-import trash_maker.core.notifications.NotificationRow;
+import trash_maker.core.NotificationRepository.NotificationRow;
 import trash_maker.domain.RuleParserTest;
 import trash_maker.domain.evaluation.RuleEvaluation;
-import trash_maker.domain.notification.NotificationStatus;
-import trash_maker.domain.rule.CompiledRule;
-import trash_maker.domain.signal.SignalKind;
-import trash_maker.domain.signal.SignalValue;
-import trash_maker.domain.signal.Value;
+import trash_maker.domain.notification.Lifecycle.NotificationStatus;
+import trash_maker.domain.rule.Rule.CompiledRule;
+import trash_maker.domain.signal.Signals.SignalKind;
+import trash_maker.domain.signal.Signals.SignalValue;
+import trash_maker.domain.signal.Signals.Value;
+import trash_maker.support.CoreProfile;
 import trash_maker.support.Fx;
 import trash_maker.support.RecordingPublisher;
-import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
-import static trash_maker.domain.notification.NotificationStatus.*;
 import static org.assertj.core.api.Assertions.assertThat;
+import static trash_maker.domain.notification.Lifecycle.NotificationStatus.*;
 
 @QuarkusTest
 @TestProfile(CoreProfile.class)
@@ -151,7 +150,7 @@ class LifecycleIntegrationTest {
         fx.relay();
         fx.result(n.id(), 2, "PUSH", "FAILURE", "b");
         assertThat(fx.get(n.id()).status()).isEqualTo(RETRIES_EXHAUSTED);
-        fx.e.commands.retrigger("acme", n.id(), "ops");
+        fx.e.notifications.retrigger("acme", n.id(), "ops");
         List<RecordingPublisher.Msg> m = fx.relay();
         assertThat(m.get(0).payload().get("attempt").asInt()).isEqualTo(3); // unique per message, actuators dedupe on id+attempt
         fx.result(n.id(), 3, "PUSH", "FAILURE", "c");
@@ -283,7 +282,7 @@ class LifecycleIntegrationTest {
                 "customer_email", new SignalValue("customer_email", SignalKind.KPI, new Value.Str("a@b.c"), T0),
                 "due_date", new SignalValue("due_date", SignalKind.DATE, Value.Date.parse("2026-12-10"), T0),
                 "kpi2", new SignalValue("kpi2", SignalKind.KPI, new Value.Bool(true), T0));
-        RuleEvaluation.Result dry = fx.e.dryRun.run(rule, "cust-1", s, null, T0, false, 0, null, Map.of());
+        RuleEvaluation.Result dry = fx.e.evaluation.dryRun(rule, "cust-1", s, null, T0, false, 0, null, Map.of());
         assertThat(dry.evaluation().nodes().get("$.trigger.expression.or[1]").value().name()).isEqualTo("TRUE");
         assertThat(dry.decision().fire()).isTrue();
         fx.signal("cust-1", "customer_email", "a@b.c");

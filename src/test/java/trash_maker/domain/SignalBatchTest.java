@@ -2,8 +2,8 @@ package trash_maker.domain;
 
 import org.junit.jupiter.api.Test;
 import trash_maker.common.Json;
-import trash_maker.domain.signal.SignalBatch;
-import trash_maker.domain.signal.SignalEnvelope;
+import trash_maker.domain.signal.Signals.SignalBatch;
+import trash_maker.domain.signal.Signals.SignalEnvelope;
 
 import java.time.Instant;
 import java.util.List;

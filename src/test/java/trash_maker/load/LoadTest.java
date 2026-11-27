@@ -9,13 +9,13 @@ import trash_maker.common.Json;
 import trash_maker.core.Engine;
 import trash_maker.support.Fx;
 
-import javax.sql.DataSource;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import javax.sql.DataSource;
 
 /**
  * Load test (opt-in: ./mvnw verify -Pload [-Dload.kafka=true]). The Quarkus application runs its real timer workers

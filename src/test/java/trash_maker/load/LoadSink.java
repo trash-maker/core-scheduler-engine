@@ -5,8 +5,8 @@ import jakarta.enterprise.inject.Alternative;
 import jakarta.inject.Singleton;
 import org.eclipse.microprofile.config.ConfigProvider;
 import trash_maker.common.Json;
-import trash_maker.core.ports.MessagePublisher;
-import trash_maker.infra.kafka.KafkaMessagePublisher;
+import trash_maker.core.Ports.MessagePublisher;
+import trash_maker.infra.EngineProducer.KafkaMessagePublisher;
 
 import java.time.Duration;
 import java.time.Instant;

@@ -2,13 +2,13 @@ package trash_maker.domain;
 
 import org.junit.jupiter.api.Test;
 import trash_maker.common.Json;
-import trash_maker.domain.body.BodySchemaValidator;
+import trash_maker.domain.body.BodyResolver.BodySchemaValidator;
 import trash_maker.domain.evaluation.RuleEvaluation;
-import trash_maker.domain.rule.CompiledRule;
+import trash_maker.domain.rule.Rule.CompiledRule;
 import trash_maker.domain.rule.RuleParser;
-import trash_maker.domain.signal.SignalKind;
-import trash_maker.domain.signal.SignalValue;
-import trash_maker.domain.signal.Value;
+import trash_maker.domain.signal.Signals.SignalKind;
+import trash_maker.domain.signal.Signals.SignalValue;
+import trash_maker.domain.signal.Signals.Value;
 
 import java.time.Duration;
 import java.time.Instant;

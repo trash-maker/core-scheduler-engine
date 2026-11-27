@@ -1,13 +1,12 @@
 package trash_maker.core;
 
-import jakarta.inject.Singleton;
-
 import com.fasterxml.jackson.databind.JsonNode;
 import com.networknt.schema.JsonSchema;
 import com.networknt.schema.JsonSchemaFactory;
 import com.networknt.schema.SpecVersion;
 import com.networknt.schema.ValidationMessage;
-import trash_maker.domain.body.BodySchemaValidator;
+import jakarta.inject.Singleton;
+import trash_maker.domain.body.BodyResolver.BodySchemaValidator;
 
 import java.util.List;
 import java.util.Map;

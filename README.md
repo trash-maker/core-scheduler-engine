@@ -125,7 +125,7 @@ Transactions are managed by Quarkus (Narayana JTA). Agroal enlists the JDBC conn
 
 * **Boundaries.** `@Transactional` marks the service entry points: `SignalIngestService.ingest`,
   `TimerService.runOnce`, `OutboxRelay.relayOnce`, `ResultService.process`, the `RuleService` writes and
-  `NotificationCommands`. Retention needs several short transactions in one call, so it uses
+  the operator commands of `NotificationEngine` (cancel, re-trigger, requeue). Retention needs several short transactions in one call, so it uses
   `QuarkusTransaction.requiringNew()` through `Db.inNewTx`.
 * **Data access.** Repositories use plain JDBC on the enlisted connection via `Db.with`. Hot paths have no ORM.
 * **Per-item isolation.** Timer handlers and batch fallbacks run under SQL savepoints (`SAVEPOINT` /
@@ -147,18 +147,18 @@ only loads state, calls these functions and persists the effects they return.
 | decision | pure function | unit test |
 |---|---|---|
 | expression truth, MISSING/stale, `for`/`within`, next change instants | `Evaluator`, `ExpressionCompiler`, `DslParser` | `ExpressionTest` |
-| firing (edge / cooldown), new rule state, per-entity timer | `FiringDecision`, `RuleEvaluation.Result.nextState/entityTimer` | `RuleEvaluationTest` |
+| firing (edge / cooldown), new rule state, per-entity timer | `RuleEvaluation` (`FiringDecision`, `Result.nextState/entityTimer`) | `RuleEvaluationTest` |
 | notifications to create, due/expiry, resolved bodies (shared with dry-run) | `FiringPlanner`, `BodyResolver` | `BodyResolverTest`, `LifecycleIntegrationTest.dryRunEqualsRealProcessing` |
-| signal idempotency, unreferenced filter, latest value, `$trigger` choice | `SignalBatch` | `SignalBatchTest` |
-| notification lifecycle, retries/backoff, late outcomes, re-trigger | `StateMachine`, `RetryPolicy` | `StateMachineTest` |
-| child activation / skip, WHILE_IN_STATE series | `Dependencies` | `DependencyMatrixTest` |
-| recurring occurrence: parent re-check, limits, misfire, next due | `SeriesStep` | `SeriesStepTest` |
-| outcome parsing and correlation (tenant / action) | `OutcomeMessage` | `MessagesAndRetentionTest` |
-| output message contract (key, headers, payload) | `NotificationMessage` | `MessagesAndRetentionTest` |
-| timer failure backoff / timer_dead, sweep continuation | `TimerFailurePolicy`, `SweepStep` | `TimerAndSweepTest` |
-| recurrences (cron, periods, DST) | `CronRecurrence`, `PeriodRecurrence` | `RecurrenceTest` |
+| signal idempotency, unreferenced filter, latest value, `$trigger` choice | `Signals.SignalBatch` | `SignalBatchTest` |
+| notification lifecycle, retries/backoff, late outcomes, re-trigger | `StateMachine`, `Rule.RetryPolicy` | `StateMachineTest` |
+| child activation / skip, WHILE_IN_STATE series | `StateMachine.Dependencies` | `DependencyMatrixTest` |
+| recurring occurrence: parent re-check, limits, misfire, next due | `SchedulingPolicies.SeriesStep` | `SeriesStepTest` |
+| outcome parsing and correlation (tenant / action) | `Lifecycle.OutcomeMessage` | `MessagesAndRetentionTest` |
+| output message contract (key, headers, payload) | `Lifecycle.NotificationMessage` | `MessagesAndRetentionTest` |
+| timer failure backoff / timer_dead, sweep continuation | `SchedulingPolicies.TimerFailurePolicy`, `.SweepStep` | `TimerAndSweepTest` |
+| recurrences (cron, periods, DST) | `Recurrence` (`CronRecurrence`, `PeriodRecurrence`) | `RecurrenceTest` |
 | rule validation (paths, cycles, depth) | `RuleParser` | `RuleParserTest` |
-| partition retention | `RetentionPolicy` | `MessagesAndRetentionTest` |
+| partition retention | `SchedulingPolicies.RetentionPolicy` | `MessagesAndRetentionTest` |
 
 `ArchitectureTest` enforces the following for `domain` and `common`:
 * no framework imports;
@@ -191,31 +191,28 @@ It also enforces that `core` uses neither Kafka, JPA, Micrometer nor OpenTelemet
 └── src/main/
     ├── resources/db/migration/V1__schema.sql   tables, partitioning function, indexes, autovacuum settings
     ├── resources/application.properties        service configuration (see reference below)
-    └── java/trash_maker/
-        ├── common/        IsoAmount (ISO-8601 periods+durations), Json, ValidationError
-        ├── domain/
-        │   ├── signal/        Value (number|boolean|string|date), SignalEnvelope, SignalBatch (dedup/filter/latest)
-        │   ├── expr/          Node tree, ExpressionCompiler, DslParser, Evaluator (3-valued, for/within, next-change instants)
-        │   ├── recurrence/    CronRecurrence (5 fields, L, names; DST rules), PeriodRecurrence (anchor + n*period)
-        │   ├── rule/          RuleParser (validation with JSON paths), CompiledRule, TemplateDef, RetryPolicy, TimeSpec ...
-        │   ├── notification/  StateMachine, Event, Effect, Transition, Dependencies (parent/child matrix),
-        │   │                  NotificationMessage (output contract), OutcomeMessage (parse + correlation check)
-        │   ├── body/          BodyResolver, JsonPath (safe subset), Transforms (whitelist)
-        │   ├── evaluation/    FiringDecision, FiringPlanner, RuleEvaluation (single pipeline + next state/timer), FrozenContext
-        │   ├── series/        SeriesStep (occurrence, misfire, limits, parent re-check)
-        │   ├── timer/         TimerFailurePolicy (backoff / timer_dead), SweepStep (sweep continuation)
-        │   └── retention/     RetentionPolicy
-        ├── core/
-        │   ├── db/            Db (JTA-enlisted connections, SQL savepoints, after-commit hooks), Jdbc helpers
-        │   ├── ports/         MessagePublisher, EngineMetrics, TraceContext, TimerWakeup
-        │   ├── signals/  rules/  evaluation/  notifications/  timers/  dispatch/  results/  ops/
-        │   ├── Engine.java    CDI facade over the services (used by adapters and tests)
-        │   └── Uuid7.java     time-ordered ids (partition key)
-        └── infra/
-            ├── config/   NotificationsConfig (@ConfigMapping), EngineProducer, RolesConfigSourceFactory
-            ├── kafka/    SignalsConsumer, ResultsConsumer, KafkaMessagePublisher, FakeActuator
-            ├── api/      RuleResource (CRUD, validate, dry-run, state), NotificationResource, OpsResource, TenantGuard
-            └── ops/      Workers (virtual threads), Jobs (reload, partitions, retention, gauges), metrics, health
+    └── java/trash_maker/            51 files: one file per concept, small types nested in it
+        ├── common/        IsoAmount (+ Durations), Json, Validation (ValidationError, ValidationException)
+        ├── domain/        pure functions only
+        │   ├── notification/  Lifecycle (statuses, events, effects, transitions, failure, outcome and output messages)
+        │   │                  StateMachine (+ Dependencies: parent/child matrix)
+        │   ├── rule/          Rule (definition, trigger, templates, TimeSpec, RetryPolicy, enums, CompiledRule), RuleParser
+        │   ├── expr/          Expr (Node tree, Op, Truth, input/result), ExpressionCompiler, Evaluator, DslParser
+        │   ├── body/          BodyResolver (+ context, JsonPath, Transforms, schema port)
+        │   ├── signal/        Signals (Value, SignalEnvelope, SignalValue, SignalBatch)
+        │   ├── recurrence/    Recurrence (+ CronRecurrence, PeriodRecurrence; DST rules)
+        │   ├── evaluation/    RuleEvaluation (single pipeline + FiringDecision), FiringPlanner (+ FrozenContext)
+        │   └── scheduling/    SchedulingPolicies (SeriesStep, TimerFailurePolicy, SweepStep, RetentionPolicy)
+        ├── core/          one package: CDI services, JTA transactions, JDBC
+        │                  Engine (facade), EngineConfig, Ports (+ WakeupHub), Db, Jdbc (+ Uuid7), SchemaValidators,
+        │                  SignalIngestService, SignalStore, EvaluationService (+ dry-run), RuleStateRepository,
+        │                  NotificationEngine (+ operator commands), NotificationRepository, SeriesRepository,
+        │                  TimerService (+ Worker loop), TimerRepository, Outbox (+ dead letters), OutboxRelay,
+        │                  ResultService, RuleService, RuleRegistry, RuleRepository, Maintenance
+        └── infra/         one package: Quarkus adapters
+                           EngineProducer (+ Kafka producer, Micrometer and OpenTelemetry adapters), NotificationsConfig,
+                           RolesConfigSourceFactory, KafkaConsumers, FakeActuator, RuleResource, NotificationResource,
+                           OpsResource, ApiSupport (tenant guard, role filter, error mapping), Dtos, Workers (+ health), Jobs
 src/test/java/trash_maker/
     domain/  plain JUnit on the pure functions (truth tables, recurrence/DST, state machine, backoff, body, rule validation,
              dependency matrix, signal batch, series step, timer policy, sweep, messages, retention, pipeline, architecture)

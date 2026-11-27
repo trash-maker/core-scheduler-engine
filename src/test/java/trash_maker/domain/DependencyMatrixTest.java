@@ -1,19 +1,19 @@
 package trash_maker.domain;
 
-import trash_maker.domain.notification.Dependencies;
-import trash_maker.domain.notification.Dependencies.ChildAction;
-import trash_maker.domain.notification.Dependencies.SeriesAction;
-import trash_maker.domain.notification.Dependencies.SeriesState;
-import trash_maker.domain.rule.Enums.ParentTrigger;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import trash_maker.domain.notification.StateMachine.Dependencies.ChildAction;
+import trash_maker.domain.notification.StateMachine.Dependencies.SeriesAction;
+import trash_maker.domain.notification.StateMachine.Dependencies.SeriesState;
+import trash_maker.domain.notification.StateMachine.Dependencies;
+import trash_maker.domain.rule.Rule.Enums.ParentTrigger;
 
 import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.List;
 
-import static trash_maker.domain.notification.NotificationStatus.*;
 import static org.assertj.core.api.Assertions.assertThat;
+import static trash_maker.domain.notification.Lifecycle.NotificationStatus.*;
 
 class DependencyMatrixTest {
 
@@ -38,9 +38,9 @@ class DependencyMatrixTest {
             "ON_EXPIRED|EXPIRED|EXPIRED|ACTIVATE",
             "ON_EXPIRED|SKIPPED|SKIPPED|SKIP"})
     void childMatrix(ParentTrigger t, String entered, String finalStatus, ChildAction expected) {
-        List<trash_maker.domain.notification.NotificationStatus> e = Arrays.stream(entered.split(" "))
-                .map(trash_maker.domain.notification.NotificationStatus::valueOf).toList();
-        assertThat(Dependencies.child(t, e, trash_maker.domain.notification.NotificationStatus.valueOf(finalStatus))).isEqualTo(expected);
+        List<trash_maker.domain.notification.Lifecycle.NotificationStatus> e = Arrays.stream(entered.split(" "))
+                .map(trash_maker.domain.notification.Lifecycle.NotificationStatus::valueOf).toList();
+        assertThat(Dependencies.child(t, e, trash_maker.domain.notification.Lifecycle.NotificationStatus.valueOf(finalStatus))).isEqualTo(expected);
     }
 
     @ParameterizedTest(name = "{0}: {1} -> {2} -> {4}")
@@ -57,7 +57,7 @@ class DependencyMatrixTest {
             "CLOSED|RETRY_SCHEDULED|RETRIES_EXHAUSTED|false|NONE"})
     void whileInState(SeriesState st, String before, String after, boolean once, SeriesAction expected) {
         var states = EnumSet.of(FAILED, RETRY_SCHEDULED, RETRIES_EXHAUSTED);
-        assertThat(Dependencies.series(states, trash_maker.domain.notification.NotificationStatus.valueOf(before),
-                trash_maker.domain.notification.NotificationStatus.valueOf(after), st, once)).isEqualTo(expected);
+        assertThat(Dependencies.series(states, trash_maker.domain.notification.Lifecycle.NotificationStatus.valueOf(before),
+                trash_maker.domain.notification.Lifecycle.NotificationStatus.valueOf(after), st, once)).isEqualTo(expected);
     }
 }

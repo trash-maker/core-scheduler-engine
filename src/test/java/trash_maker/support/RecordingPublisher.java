@@ -4,7 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.enterprise.inject.Alternative;
 import jakarta.inject.Singleton;
 import trash_maker.common.Json;
-import trash_maker.core.ports.MessagePublisher;
+import trash_maker.core.Ports.MessagePublisher;
 
 import java.util.List;
 import java.util.Map;

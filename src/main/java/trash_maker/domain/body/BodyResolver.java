@@ -7,15 +7,23 @@ import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
 import trash_maker.common.Json;
-import trash_maker.common.ValidationError;
-import trash_maker.domain.rule.Enums.MissingValuePolicy;
-import trash_maker.domain.signal.SignalValue;
+import trash_maker.common.Validation.ValidationError;
+import trash_maker.domain.rule.Rule.Enums.MissingValuePolicy;
+import trash_maker.domain.signal.Signals.SignalValue;
+import trash_maker.domain.signal.Signals.Value;
 
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.text.DecimalFormat;
+import java.text.DecimalFormatSymbols;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -331,5 +339,148 @@ public final class BodyResolver {
 
     public static boolean usesOccurrence(JsonNode t) {
         return t != null && t.toString().contains("occurrence.index");
+    }
+
+    /**
+     * Inputs for body resolution.
+     * parentDeferred/occurrenceDeferred: resolution is a creation-time check; the real values are bound later
+     * (child activation / each occurrence) from the frozen context.
+     */
+    public record BodyContext(Map<String, SignalValue> signals, JsonNode trigger, JsonNode parent, boolean parentDeferred,
+                              String correlationKey, Instant now, ZoneId zone, Integer occurrenceIndex,
+                              boolean occurrenceDeferred, String ruleId, String templateId) {
+
+        public BodyContext withParent(JsonNode p) {
+            return new BodyContext(signals, trigger, p, false, correlationKey, now, zone, occurrenceIndex, occurrenceDeferred, ruleId, templateId);
+        }
+
+        public BodyContext withOccurrence(int index, Instant at) {
+            return new BodyContext(signals, trigger, parent, parentDeferred, correlationKey, at, zone, index, false, ruleId, templateId);
+        }
+    }
+
+    /** Body could not be resolved; with policy FAIL the whole firing is rejected (DLQ, no partial set). */
+    public static class BodyResolutionException extends RuntimeException {
+        private final String path;
+
+        public BodyResolutionException(String path, String message) {
+            super(path + ": " + message);
+            this.path = path;
+        }
+
+        public String path() { return path; }
+    }
+
+    /** Port: validates a resolved body against a template's JSON Schema; returns error messages (empty = valid). */
+    public interface BodySchemaValidator {
+        BodySchemaValidator NONE = (schema, body) -> List.of();
+
+        List<String> validate(JsonNode schema, JsonNode body);
+    }
+
+    /** Minimal, safe JSONPath subset: $, .name, ['name'], [index]. No filters, no wildcards, no scripts. */
+    public static final class JsonPath {
+        private final List<Object> steps;
+        private final String text;
+
+        private JsonPath(String text, List<Object> steps) { this.text = text; this.steps = steps; }
+
+        public static JsonPath compile(String p) {
+            if (p == null || !p.startsWith("$")) throw new IllegalArgumentException("path must start with '$'");
+            List<Object> steps = new ArrayList<>();
+            int i = 1;
+            while (i < p.length()) {
+                char c = p.charAt(i);
+                if (c == '.') {
+                    int j = i + 1;
+                    while (j < p.length() && p.charAt(j) != '.' && p.charAt(j) != '[') j++;
+                    String name = p.substring(i + 1, j);
+                    if (name.isEmpty() || name.equals("*")) throw new IllegalArgumentException("invalid path segment at " + i);
+                    steps.add(name);
+                    i = j;
+                } else if (c == '[') {
+                    int j = p.indexOf(']', i);
+                    if (j < 0) throw new IllegalArgumentException("unclosed '[' at " + i);
+                    String in = p.substring(i + 1, j).trim();
+                    if (in.startsWith("'") && in.endsWith("'") && in.length() >= 2) steps.add(in.substring(1, in.length() - 1));
+                    else {
+                        try { steps.add(Integer.parseInt(in)); } catch (NumberFormatException e) { throw new IllegalArgumentException("invalid index '" + in + "'"); }
+                    }
+                    i = j + 1;
+                } else throw new IllegalArgumentException("unexpected '" + c + "' at " + i);
+            }
+            if (steps.size() > 32) throw new IllegalArgumentException("path too deep");
+            return new JsonPath(p, List.copyOf(steps));
+        }
+
+        /** Returns the node or null if absent / JSON null. */
+        public JsonNode read(JsonNode root) {
+            JsonNode cur = root;
+            for (Object s : steps) {
+                if (cur == null) return null;
+                cur = s instanceof Integer idx ? (cur.isArray() ? cur.get(idx) : null) : (cur.isObject() ? cur.get((String) s) : null);
+            }
+            return cur == null || cur.isNull() || cur.isMissingNode() ? null : cur;
+        }
+
+        @Override
+        public String toString() { return text; }
+    }
+
+    /** Whitelisted value transforms. Syntax: name or name:'argument'. */
+    public static final class Transforms {
+        public static final Set<String> NAMES = Set.of("date", "number", "upper", "lower", "capitalize", "trim", "default");
+
+        public record Transform(String name, String arg) {}
+
+        private Transforms() {}
+
+        public static List<Transform> parseList(List<String> specs) {
+            List<Transform> out = new ArrayList<>();
+            for (String s : specs) out.add(parse(s));
+            return out;
+        }
+
+        public static Transform parse(String spec) {
+            String s = spec.trim();
+            int colon = s.indexOf(':');
+            String name = colon < 0 ? s : s.substring(0, colon).trim();
+            String arg = null;
+            if (colon >= 0) {
+                String a = s.substring(colon + 1).trim();
+                if (a.length() >= 2 && (a.startsWith("'") && a.endsWith("'") || a.startsWith("\"") && a.endsWith("\""))) arg = a.substring(1, a.length() - 1);
+                else throw new IllegalArgumentException("transform argument must be quoted: " + spec);
+            }
+            if (!NAMES.contains(name)) throw new IllegalArgumentException("unknown transform '" + name + "' (allowed: " + NAMES + ")");
+            if ((name.equals("date") || name.equals("number") || name.equals("default")) && arg == null)
+                throw new IllegalArgumentException("transform '" + name + "' requires an argument");
+            if (name.equals("date")) DateTimeFormatter.ofPattern(arg, Locale.ROOT);
+            if (name.equals("number")) new DecimalFormat(arg, DecimalFormatSymbols.getInstance(Locale.ROOT));
+            return new Transform(name, arg);
+        }
+
+        public static JsonNode apply(Transform t, JsonNode v, ZoneId zone) {
+            return switch (t.name()) {
+                case "default" -> v;
+                case "upper" -> TextNode.valueOf(v.asText().toUpperCase(Locale.ROOT));
+                case "lower" -> TextNode.valueOf(v.asText().toLowerCase(Locale.ROOT));
+                case "trim" -> TextNode.valueOf(v.asText().trim());
+                case "capitalize" -> {
+                    String s = v.asText();
+                    yield TextNode.valueOf(s.isEmpty() ? s : Character.toUpperCase(s.charAt(0)) + s.substring(1));
+                }
+                case "date" -> {
+                    Value.Date d;
+                    try { d = Value.Date.parse(v.asText()); } catch (IllegalArgumentException e) { throw new IllegalArgumentException("value is not a date"); }
+                    yield TextNode.valueOf(DateTimeFormatter.ofPattern(t.arg(), Locale.ROOT).format(d.at(zone)));
+                }
+                case "number" -> {
+                    BigDecimal n;
+                    try { n = v.isNumber() ? v.decimalValue() : new BigDecimal(v.asText().trim()); } catch (NumberFormatException e) { throw new IllegalArgumentException("value is not a number"); }
+                    yield TextNode.valueOf(new DecimalFormat(t.arg(), DecimalFormatSymbols.getInstance(Locale.ROOT)).format(n));
+                }
+                default -> throw new IllegalArgumentException("unknown transform " + t.name());
+            };
+        }
     }
 }

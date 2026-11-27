@@ -3,12 +3,11 @@ package trash_maker.it;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
-import trash_maker.support.CoreProfile;
-
-import trash_maker.core.notifications.NotificationRow;
-import trash_maker.domain.notification.NotificationStatus;
-import trash_maker.support.Fx;
 import org.junit.jupiter.api.Test;
+import trash_maker.core.NotificationRepository.NotificationRow;
+import trash_maker.domain.notification.Lifecycle.NotificationStatus;
+import trash_maker.support.CoreProfile;
+import trash_maker.support.Fx;
 
 import java.time.Duration;
 import java.time.Instant;

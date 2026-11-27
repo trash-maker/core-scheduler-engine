@@ -2,8 +2,8 @@ package trash_maker.domain;
 
 import org.junit.jupiter.api.Test;
 import trash_maker.common.IsoAmount;
-import trash_maker.domain.recurrence.PeriodRecurrence;
-import trash_maker.domain.series.SeriesStep;
+import trash_maker.domain.recurrence.Recurrence.PeriodRecurrence;
+import trash_maker.domain.scheduling.SchedulingPolicies.SeriesStep;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -11,7 +11,7 @@ import java.time.ZoneOffset;
 import java.util.EnumSet;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static trash_maker.domain.notification.NotificationStatus.*;
+import static trash_maker.domain.notification.Lifecycle.NotificationStatus.*;
 
 class SeriesStepTest {
     static final Instant T = Instant.parse("2026-01-01T10:00:00Z");

@@ -1,10 +1,10 @@
 package trash_maker.infra;
 
-import trash_maker.infra.config.RolesConfigSourceFactory;
 import io.smallrye.config.ConfigSourceContext;
 import io.smallrye.config.ConfigValue;
 import org.eclipse.microprofile.config.spi.ConfigSource;
 import org.junit.jupiter.api.Test;
+import trash_maker.infra.RolesConfigSourceFactory;
 
 import java.util.Iterator;
 import java.util.List;

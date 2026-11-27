@@ -1,9 +1,9 @@
 package trash_maker.domain;
 
-import trash_maker.common.IsoAmount;
-import trash_maker.domain.recurrence.CronRecurrence;
-import trash_maker.domain.recurrence.PeriodRecurrence;
 import org.junit.jupiter.api.Test;
+import trash_maker.common.IsoAmount;
+import trash_maker.domain.recurrence.Recurrence.CronRecurrence;
+import trash_maker.domain.recurrence.Recurrence.PeriodRecurrence;
 
 import java.time.LocalDateTime;
 import java.time.ZoneId;

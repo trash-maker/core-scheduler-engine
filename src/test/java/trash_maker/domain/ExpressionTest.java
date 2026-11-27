@@ -1,22 +1,22 @@
 package trash_maker.domain;
 
-import trash_maker.common.Json;
-import trash_maker.common.ValidationError;
-import trash_maker.domain.expr.DslParser;
-import trash_maker.domain.expr.EvalInput;
-import trash_maker.domain.expr.EvalResult;
-import trash_maker.domain.expr.Evaluator;
-import trash_maker.domain.expr.ExpressionCompiler;
-import trash_maker.domain.expr.LeafMemory;
-import trash_maker.domain.expr.Node;
-import trash_maker.domain.expr.OnMissing;
-import trash_maker.domain.expr.Truth;
-import trash_maker.domain.signal.SignalKind;
-import trash_maker.domain.signal.SignalValue;
-import trash_maker.domain.signal.Value;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import trash_maker.common.Json;
+import trash_maker.common.Validation.ValidationError;
+import trash_maker.domain.expr.DslParser;
+import trash_maker.domain.expr.Evaluator;
+import trash_maker.domain.expr.Expr.EvalInput;
+import trash_maker.domain.expr.Expr.EvalResult;
+import trash_maker.domain.expr.Expr.LeafMemory;
+import trash_maker.domain.expr.Expr.Node;
+import trash_maker.domain.expr.Expr.OnMissing;
+import trash_maker.domain.expr.Expr.Truth;
+import trash_maker.domain.expr.ExpressionCompiler;
+import trash_maker.domain.signal.Signals.SignalKind;
+import trash_maker.domain.signal.Signals.SignalValue;
+import trash_maker.domain.signal.Signals.Value;
 
 import java.math.BigDecimal;
 import java.time.Duration;

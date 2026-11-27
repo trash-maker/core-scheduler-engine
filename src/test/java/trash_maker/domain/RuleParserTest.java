@@ -1,10 +1,10 @@
 package trash_maker.domain;
 
-import trash_maker.common.Json;
-import trash_maker.common.ValidationError;
-import trash_maker.domain.rule.CompiledRule;
-import trash_maker.domain.rule.RuleParser;
 import org.junit.jupiter.api.Test;
+import trash_maker.common.Json;
+import trash_maker.common.Validation.ValidationError;
+import trash_maker.domain.rule.Rule.CompiledRule;
+import trash_maker.domain.rule.RuleParser;
 
 import java.util.List;
 import java.util.Set;

@@ -1,13 +1,15 @@
 package trash_maker.domain.expr;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import trash_maker.common.Durations;
+import trash_maker.common.IsoAmount.Durations;
 import trash_maker.common.IsoAmount;
-import trash_maker.common.ValidationError;
-import trash_maker.domain.recurrence.CronRecurrence;
-import trash_maker.domain.recurrence.PeriodRecurrence;
+import trash_maker.common.Validation.ValidationError;
+import trash_maker.domain.expr.Expr.Node;
+import trash_maker.domain.expr.Expr.Op;
+import trash_maker.domain.recurrence.Recurrence.CronRecurrence;
+import trash_maker.domain.recurrence.Recurrence.PeriodRecurrence;
 import trash_maker.domain.recurrence.Recurrence;
-import trash_maker.domain.signal.Value;
+import trash_maker.domain.signal.Signals.Value;
 
 import java.time.DateTimeException;
 import java.time.Duration;

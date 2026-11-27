@@ -1,27 +1,27 @@
 package trash_maker.domain;
 
-import trash_maker.domain.notification.Effect;
-import trash_maker.domain.notification.Event;
-import trash_maker.domain.notification.IllegalTransitionException;
-import trash_maker.domain.notification.NotificationState;
-import trash_maker.domain.notification.NotificationStatus;
-import trash_maker.domain.notification.OutcomeType;
-import trash_maker.domain.notification.StateMachine;
-import trash_maker.domain.notification.TimerKind;
-import trash_maker.domain.notification.Transition;
-import trash_maker.domain.rule.Enums;
-import trash_maker.domain.rule.RetryPolicy;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import trash_maker.domain.notification.Lifecycle.Effect;
+import trash_maker.domain.notification.Lifecycle.Event;
+import trash_maker.domain.notification.Lifecycle.IllegalTransitionException;
+import trash_maker.domain.notification.Lifecycle.NotificationState;
+import trash_maker.domain.notification.Lifecycle.NotificationStatus;
+import trash_maker.domain.notification.Lifecycle.OutcomeType;
+import trash_maker.domain.notification.Lifecycle.TimerKind;
+import trash_maker.domain.notification.Lifecycle.Transition;
+import trash_maker.domain.notification.StateMachine;
+import trash_maker.domain.rule.Rule.Enums;
+import trash_maker.domain.rule.Rule.RetryPolicy;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
 
-import static trash_maker.domain.notification.NotificationStatus.*;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static trash_maker.domain.notification.Lifecycle.NotificationStatus.*;
 
 class StateMachineTest {
     static final Instant T0 = Instant.parse("2024-05-01T10:00:00Z");

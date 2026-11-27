@@ -1,6 +1,16 @@
 package trash_maker.domain.notification;
 
-import static trash_maker.domain.notification.NotificationStatus.*;
+import trash_maker.domain.notification.Lifecycle.Effect;
+import trash_maker.domain.notification.Lifecycle.Event;
+import trash_maker.domain.notification.Lifecycle.Failure;
+import trash_maker.domain.notification.Lifecycle.IllegalTransitionException;
+import trash_maker.domain.notification.Lifecycle.NotificationState;
+import trash_maker.domain.notification.Lifecycle.NotificationStatus;
+import trash_maker.domain.notification.Lifecycle.OutcomeType;
+import trash_maker.domain.notification.Lifecycle.StatusChange;
+import trash_maker.domain.notification.Lifecycle.TimerKind;
+import trash_maker.domain.notification.Lifecycle.Transition;
+import trash_maker.domain.rule.Rule.Enums.ParentTrigger;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -11,6 +21,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.DoubleSupplier;
+
+import static trash_maker.domain.notification.Lifecycle.NotificationStatus.*;
 
 /**
  * Pure notification state machine: (state, event, now) -> new state + effects + history.
@@ -167,7 +179,7 @@ public final class StateMachine {
         b.effects.add(new Effect.CancelTimers(EnumSet.of(TimerKind.ATTEMPT_TIMEOUT)));
         b.s = s.withFailure(new Failure(outcome, reason, s.attempt(), now));
         b.move(FAILED, reason);
-        trash_maker.domain.rule.RetryPolicy p = b.s.retryPolicy();
+        trash_maker.domain.rule.Rule.RetryPolicy p = b.s.retryPolicy();
         if (permanent) { b.move(RETRIES_EXHAUSTED, "permanent failure"); return; }
         if (b.s.cycleAttempts() >= p.maxAttempts()) { b.move(RETRIES_EXHAUSTED, "max attempts " + p.maxAttempts() + " reached"); return; }
         Instant next = now.plus(p.delay(b.s.cycleAttempts(), random.getAsDouble()));
@@ -177,4 +189,63 @@ public final class StateMachine {
         b.effects.add(new Effect.ScheduleTimer(TimerKind.PUBLISH, next));
     }
 
+    /**
+     * Pure parent/child dependency matrix.
+     * <ul>
+     *   <li>A waiting child is ACTIVATED when the parent enters the status its trigger names
+     *       (ON_FAILED: first failure; ON_PUBLISHED: first publish; others: entering that status).</li>
+     *   <li>It is SKIPPED when the parent reaches a terminal status without the trigger having matched
+     *       (cascades to its own children).</li>
+     *   <li>WHILE_IN_STATE series run while the parent is in one of the states; FAILED in {@code states}
+     *       also matches RETRY_SCHEDULED/RETRIES_EXHAUSTED because FAILED is transient.</li>
+     * </ul>
+     */
+    public static final class Dependencies {
+        private Dependencies() {}
+
+        public enum ChildAction { ACTIVATE, SKIP, NONE }
+
+        public enum SeriesAction { START, CLOSE_RECOVERED, CLOSE_TERMINATED, NONE }
+
+        public enum SeriesState { WAITING, ACTIVE, CLOSED }
+
+        public static NotificationStatus statusFor(ParentTrigger t) {
+            return switch (t) {
+                case ON_FAILED -> NotificationStatus.FAILED;
+                case ON_RETRIES_EXHAUSTED -> NotificationStatus.RETRIES_EXHAUSTED;
+                case ON_SUCCEEDED -> NotificationStatus.SUCCEEDED;
+                case ON_PUBLISHED -> NotificationStatus.PUBLISHED;
+                case ON_CANCELLED -> NotificationStatus.CANCELLED;
+                case ON_EXPIRED -> NotificationStatus.EXPIRED;
+                case WHILE_IN_STATE -> throw new IllegalArgumentException("WHILE_IN_STATE is handled by series");
+            };
+        }
+
+        public static ChildAction child(ParentTrigger trigger, List<NotificationStatus> entered, NotificationStatus parentNow) {
+            if (entered.contains(statusFor(trigger))) return ChildAction.ACTIVATE;
+            if (parentNow.terminal()) return ChildAction.SKIP;
+            return ChildAction.NONE;
+        }
+
+        public static boolean inStates(Set<NotificationStatus> states, NotificationStatus s) {
+            if (states.contains(s)) return true;
+            return states.contains(NotificationStatus.FAILED)
+                    && (s == NotificationStatus.RETRY_SCHEDULED || s == NotificationStatus.RETRIES_EXHAUSTED);
+        }
+
+        /**
+         * @param current state of the latest series for (parent, template)
+         */
+        public static SeriesAction series(Set<NotificationStatus> states, NotificationStatus before, NotificationStatus after,
+                                          SeriesState current, boolean once) {
+            boolean inAfter = inStates(states, after);
+            boolean inBefore = inStates(states, before);
+            return switch (current) {
+                case ACTIVE -> inAfter ? SeriesAction.NONE
+                        : (after == NotificationStatus.SUCCEEDED || !after.terminal()) ? SeriesAction.CLOSE_RECOVERED : SeriesAction.CLOSE_TERMINATED;
+                case WAITING -> inAfter ? SeriesAction.START : after.terminal() ? SeriesAction.CLOSE_TERMINATED : SeriesAction.NONE;
+                case CLOSED -> inAfter && !inBefore && !once ? SeriesAction.START : SeriesAction.NONE;
+            };
+        }
+    }
 }

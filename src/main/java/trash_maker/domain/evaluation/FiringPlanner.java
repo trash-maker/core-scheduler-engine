@@ -3,25 +3,28 @@ package trash_maker.domain.evaluation;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import trash_maker.common.Json;
-import trash_maker.domain.body.BodyContext;
-import trash_maker.domain.body.BodyResolutionException;
+import trash_maker.domain.body.BodyResolver.BodyContext;
+import trash_maker.domain.body.BodyResolver.BodyResolutionException;
+import trash_maker.domain.body.BodyResolver.BodySchemaValidator;
 import trash_maker.domain.body.BodyResolver;
-import trash_maker.domain.body.BodySchemaValidator;
-import trash_maker.domain.notification.NotificationStatus;
+import trash_maker.domain.notification.Lifecycle.NotificationStatus;
 import trash_maker.domain.recurrence.Recurrence;
-import trash_maker.domain.rule.CompiledRule;
-import trash_maker.domain.rule.Enums;
-import trash_maker.domain.rule.RetryPolicy;
-import trash_maker.domain.rule.TemplateDef;
-import trash_maker.domain.rule.TimeSpec;
-import trash_maker.domain.rule.UntilSpec;
-import trash_maker.domain.signal.SignalValue;
+import trash_maker.domain.rule.Rule.CompiledRule;
+import trash_maker.domain.rule.Rule.Enums;
+import trash_maker.domain.rule.Rule.RetryPolicy;
+import trash_maker.domain.rule.Rule.TemplateDef;
+import trash_maker.domain.rule.Rule.TimeSpec;
+import trash_maker.domain.rule.Rule.UntilSpec;
+import trash_maker.domain.signal.Signals.SignalKind;
+import trash_maker.domain.signal.Signals.SignalValue;
+import trash_maker.domain.signal.Signals.Value;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -170,5 +173,56 @@ public final class FiringPlanner {
             if (!errs.isEmpty()) throw new PlanningException(t.id(), "BODY_SCHEMA_VIOLATION", String.join("; ", errs));
         }
         return body;
+    }
+
+    /** Snapshot of everything needed to resolve deferred body parts later, frozen at firing time. */
+    public record FrozenContext(String tenantId, String ruleId, String correlationKey, Instant firedAt, ZoneId zone,
+                                Map<String, SignalValue> signals, JsonNode trigger) {
+
+        public ObjectNode toJson() {
+            ObjectNode o = Json.object();
+            o.put("tenantId", tenantId);
+            o.put("ruleId", ruleId);
+            o.put("correlationKey", correlationKey);
+            o.put("firedAt", firedAt.toString());
+            o.put("zone", zone.getId());
+            ObjectNode s = o.putObject("signals");
+            signals.forEach((k, v) -> {
+                ObjectNode x = s.putObject(k);
+                x.put("kind", v.kind().name());
+                x.set("value", v.value().toJson());
+                x.put("occurredAt", v.occurredAt().toString());
+            });
+            if (trigger != null) o.set("trigger", trigger);
+            return o;
+        }
+
+        public static FrozenContext fromJson(JsonNode o) {
+            Map<String, SignalValue> sig = new HashMap<>();
+            o.path("signals").fields().forEachRemaining(e -> {
+                SignalKind k = SignalKind.valueOf(e.getValue().path("kind").asText());
+                sig.put(e.getKey(), new SignalValue(e.getKey(), k, Value.fromJson(k, e.getValue().get("value")),
+                        Instant.parse(e.getValue().path("occurredAt").asText())));
+            });
+            return new FrozenContext(o.path("tenantId").asText(), o.path("ruleId").asText(), o.path("correlationKey").asText(),
+                    Instant.parse(o.path("firedAt").asText()), ZoneId.of(o.path("zone").asText("UTC")), sig,
+                    o.hasNonNull("trigger") ? o.get("trigger") : null);
+        }
+    }
+
+    /** A firing could not be planned (body resolution, schema, missing time base). Nothing is created; event goes to the DLQ. */
+    public static class PlanningException extends RuntimeException {
+        private final String templateId;
+        private final String code;
+
+        public PlanningException(String templateId, String code, String message) {
+            super("template '" + templateId + "': " + code + ": " + message);
+            this.templateId = templateId;
+            this.code = code;
+        }
+
+        public String templateId() { return templateId; }
+
+        public String code() { return code; }
     }
 }

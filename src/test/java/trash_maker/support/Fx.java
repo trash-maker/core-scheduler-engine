@@ -7,11 +7,10 @@ import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 import trash_maker.common.Json;
 import trash_maker.core.Engine;
-import trash_maker.core.notifications.NotificationRepository;
-import trash_maker.core.notifications.NotificationRow;
-import trash_maker.core.signals.SignalIngestService;
+import trash_maker.core.NotificationRepository.NotificationRow;
+import trash_maker.core.NotificationRepository;
+import trash_maker.core.SignalIngestService;
 
-import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.Statement;
@@ -21,6 +20,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
+import javax.sql.DataSource;
 
 /** Test fixture bean (CoreProfile): the engine on PostgreSQL with a controllable clock and an in-memory broker. */
 @Singleton

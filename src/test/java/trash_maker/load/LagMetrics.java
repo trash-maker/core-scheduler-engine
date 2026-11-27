@@ -2,7 +2,7 @@ package trash_maker.load;
 
 import jakarta.enterprise.inject.Alternative;
 import jakarta.inject.Singleton;
-import trash_maker.core.ports.EngineMetrics;
+import trash_maker.core.Ports.EngineMetrics;
 
 import java.util.concurrent.ConcurrentLinkedQueue;
 

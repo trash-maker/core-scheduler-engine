@@ -1,17 +1,16 @@
 package trash_maker.it;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
+import org.junit.jupiter.api.Test;
+import trash_maker.core.NotificationRepository.NotificationRow;
+import trash_maker.domain.notification.Lifecycle.NotificationStatus;
+import trash_maker.domain.notification.Lifecycle.TimerKind;
 import trash_maker.support.CoreProfile;
-
-import com.fasterxml.jackson.databind.JsonNode;
-import trash_maker.core.notifications.NotificationRow;
-import trash_maker.domain.notification.NotificationStatus;
-import trash_maker.domain.notification.TimerKind;
 import trash_maker.support.Fx;
 import trash_maker.support.RecordingPublisher;
-import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -144,7 +143,7 @@ class ReliabilityIntegrationTest {
         // runbook: fix the cause, requeue
         fx.e.timers.setFaultInjector(null);
         long deadId = fx.count("SELECT id FROM timer_dead");
-        fx.e.commands.requeueDeadTimers(List.of(deadId));
+        fx.e.notifications.requeueDeadTimers(List.of(deadId));
         fx.runTimers();
         assertThat(fx.get(poisoned.id()).status()).isEqualTo(NotificationStatus.PUBLISHED);
     }
@@ -154,7 +153,7 @@ class ReliabilityIntegrationTest {
         Fx fx = fixture.reset(T0);
         fx.e.db.runInNewTx(c -> {
             try (var st = c.createStatement()) { st.execute("INSERT INTO dead_letter (source, reason, created_at) VALUES ('t', 'kept-1', now())"); }
-            assertThatThrownBy(() -> trash_maker.core.db.Db.savepoint(c, cx -> {
+            assertThatThrownBy(() -> trash_maker.core.Db.savepoint(c, cx -> {
                 try (var st = cx.createStatement()) {
                     st.execute("INSERT INTO dead_letter (source, reason, created_at) VALUES ('t', 'rolled-back', now())");
                     st.execute("SELECT 1/0"); // aborts the PostgreSQL transaction
@@ -190,7 +189,7 @@ class ReliabilityIntegrationTest {
         UUID id = fx.notifications("k1").get(0).id();
         String claim = plan("EXPLAIN DELETE FROM timer WHERE id IN (SELECT id FROM timer WHERE due_at <= now() ORDER BY due_at LIMIT 100 FOR UPDATE SKIP LOCKED) RETURNING *", fx);
         assertThat(claim).contains("timer_due_idx");
-        String byId = plan("EXPLAIN SELECT * FROM notification WHERE id='" + id + "' AND created_at='" + trash_maker.core.Uuid7.timestamp(id) + "'", fx);
+        String byId = plan("EXPLAIN SELECT * FROM notification WHERE id='" + id + "' AND created_at='" + trash_maker.core.Jdbc.Uuid7.timestamp(id) + "'", fx);
         assertThat(byId).doesNotContain("Append"); // pruned to a single partition
         String search = plan("EXPLAIN SELECT * FROM notification WHERE tenant_id='acme' AND correlation_key='k1' ORDER BY id DESC LIMIT 50", fx);
         assertThat(search).contains("notification_p").containsIgnoringCase("index");

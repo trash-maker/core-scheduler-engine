@@ -1,8 +1,14 @@
 package trash_maker.domain.expr;
 
-import trash_maker.domain.signal.SignalKind;
-import trash_maker.domain.signal.SignalValue;
-import trash_maker.domain.signal.Value;
+import trash_maker.domain.expr.Expr.EvalInput;
+import trash_maker.domain.expr.Expr.EvalResult;
+import trash_maker.domain.expr.Expr.LeafMemory;
+import trash_maker.domain.expr.Expr.Node;
+import trash_maker.domain.expr.Expr.Op;
+import trash_maker.domain.expr.Expr.Truth;
+import trash_maker.domain.signal.Signals.SignalKind;
+import trash_maker.domain.signal.Signals.SignalValue;
+import trash_maker.domain.signal.Signals.Value;
 
 import java.time.Duration;
 import java.time.Instant;

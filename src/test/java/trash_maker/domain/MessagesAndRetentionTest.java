@@ -2,10 +2,10 @@ package trash_maker.domain;
 
 import org.junit.jupiter.api.Test;
 import trash_maker.common.Json;
-import trash_maker.domain.notification.NotificationMessage;
-import trash_maker.domain.notification.OutcomeMessage;
-import trash_maker.domain.notification.OutcomeType;
-import trash_maker.domain.retention.RetentionPolicy;
+import trash_maker.domain.notification.Lifecycle.NotificationMessage;
+import trash_maker.domain.notification.Lifecycle.OutcomeMessage;
+import trash_maker.domain.notification.Lifecycle.OutcomeType;
+import trash_maker.domain.scheduling.SchedulingPolicies.RetentionPolicy;
 
 import java.time.Instant;
 import java.util.Map;
