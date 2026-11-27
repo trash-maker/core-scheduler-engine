@@ -16,8 +16,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * Layering rules:
  * <ul>
  *   <li>domain + common: pure business logic - no framework, no I/O, no clock/random access, no mutable static state;</li>
- *   <li>core: Quarkus/CDI/JTA allowed (services, transactions), but no Kafka, JPA, Micrometer, OpenTelemetry or
- *       messaging - those stay behind the ports implemented in infra.</li>
+ *   <li>core: Quarkus, CDI, JTA, Micrometer and OpenTelemetry allowed; no Kafka, JPA or messaging - the broker stays
+ *       behind the MessagePublisher port implemented in infra.</li>
  * </ul>
  */
 class ArchitectureTest {
@@ -25,7 +25,7 @@ class ArchitectureTest {
     static final Pattern IO = Pattern.compile("^import\\s+(java\\.sql|javax\\.sql|java\\.net|java\\.io\\.File|java\\.nio\\.file|org\\.jboss\\.logging|trash_maker\\.(core|infra))");
     static final Pattern IMPURE_CALLS = Pattern.compile("(Instant\\.now\\(|System\\.currentTimeMillis|Clock\\.system|ThreadLocalRandom|Math\\.random|new Random\\(|SecureRandom|LocalDateTime\\.now\\(|ZonedDateTime\\.now\\()");
     static final Pattern MUTABLE_STATIC = Pattern.compile("^\\s*(private|public|protected)?\\s*static\\s+(?!final)[\\w<>\\[\\], ?]+\\s+\\w+\\s*(=|;)");
-    static final Pattern CORE_FORBIDDEN = Pattern.compile("^import\\s+(static\\s+)?(javax\\.persistence|jakarta\\.persistence|org\\.hibernate|org\\.apache\\.kafka|io\\.smallrye\\.reactive|io\\.micrometer|io\\.opentelemetry|trash_maker\\.infra)");
+    static final Pattern CORE_FORBIDDEN = Pattern.compile("^import\\s+(static\\s+)?(javax\\.persistence|jakarta\\.persistence|org\\.hibernate|org\\.apache\\.kafka|io\\.smallrye\\.reactive|trash_maker\\.infra)");
 
     static List<String> violations(String dir, Pattern p) throws IOException {
         List<String> out = new ArrayList<>();

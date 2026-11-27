@@ -1,6 +1,10 @@
 package trash_maker.infra;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.JsonNode;
+import trash_maker.domain.evaluation.RuleEvaluation;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import trash_maker.core.NotificationRepository.NotificationRow;
 import trash_maker.core.NotificationRepository;
 import trash_maker.core.RuleRepository.RuleRecord;
@@ -60,4 +64,41 @@ public final class Dtos {
                                 PriorState priorState) {}
 
     public record PriorState(boolean lastResult, long edgeSeq, Instant lastFiredAt) {}
+
+    /** Dry-run result: truth of every expression node, the firing decision and what would be created. Nulls are omitted. */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record DryRunResponse(boolean result, String truth, Map<String, NodeResult> nodes, Instant nextEntityChange, Instant nextRuleChange,
+                                 Decision decision, PlanningError planningError, List<PlannedNotification> notifications, List<PlannedSeries> series) {
+
+        @JsonInclude(JsonInclude.Include.NON_NULL)
+        public record NodeResult(String value, String detail) {}
+
+        public record Decision(boolean fire, String reason, long edgeSeq) {}
+
+        public record PlanningError(String templateId, String code, String message) {}
+
+        @JsonInclude(JsonInclude.Include.NON_NULL)
+        public record PlannedNotification(String templateId, String type, String action, String initialStatus, String parentTemplateId,
+                                          String parentTrigger, Instant dueAt, Instant expiresAt, String idempotencyKey,
+                                          boolean bodyDeferredUntilActivation, JsonNode body, JsonNode retryPolicy) {}
+
+        @JsonInclude(JsonInclude.Include.NON_NULL)
+        public record PlannedSeries(String templateId, String action, boolean waitingOnParent, Instant firstDueAt, Instant untilAt, Integer maxOccurrences) {}
+
+        static DryRunResponse of(RuleEvaluation.Result r) {
+            var e = r.evaluation();
+            Map<String, NodeResult> nodes = new LinkedHashMap<>();
+            e.nodes().forEach((path, n) -> nodes.put(path, new NodeResult(n.value().name(), n.detail())));
+            var pe = r.planningError();
+            var plan = r.plan();
+            return new DryRunResponse(e.value(), e.truth().name(), nodes, e.nextEntityChange(), e.nextRuleChange(),
+                    new Decision(r.decision().fire(), r.decision().reason(), r.decision().newEdgeSeq()),
+                    pe == null ? null : new PlanningError(pe.templateId(), pe.code(), pe.getMessage()),
+                    plan == null ? List.of() : plan.notifications().stream().map(p -> new PlannedNotification(p.templateId(), p.type().name(),
+                            p.action(), p.initialStatus().name(), p.parentTemplateId(), p.parentTrigger() == null ? null : p.parentTrigger().name(),
+                            p.dueAt(), p.expiresAt(), p.idempotencyKey(), p.bodyDeferred(), p.body(), p.retryPolicy().toJson())).toList(),
+                    plan == null ? List.of() : plan.series().stream().map(s -> new PlannedSeries(s.templateId(), s.action(), s.waiting(),
+                            s.firstDueAt(), s.untilAt(), s.maxOccurrences())).toList());
+        }
+    }
 }

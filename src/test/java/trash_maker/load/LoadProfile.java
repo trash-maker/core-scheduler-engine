@@ -17,11 +17,15 @@ public class LoadProfile implements QuarkusTestProfile {
 
     @Override
     public Map<String, String> getConfigOverrides() {
-        return Map.of("notifications.roles", "timers,relay", "quarkus.scheduler.enabled", "false",
+        Map<String, String> m = new java.util.HashMap<>(Map.of("notifications.role.ingest", "false", "notifications.role.results", "false",
+                "notifications.role.api", "false", "quarkus.scheduler.enabled", "false"));
+        if (!KAFKA) m.put("mp.messaging.outgoing.relay-out.enabled", "false");
+        m.putAll(Map.of(
                 "notifications.timers.workers", Integer.getInteger("load.workers", 4).toString(),
                 "notifications.relay.workers", Integer.getInteger("load.relays", 2).toString(),
                 "notifications.relay.idle", "PT0.02S", "quarkus.datasource.jdbc.max-size", "40",
-                "quarkus.log.category.\"trash_maker\".level", "WARN");
+                "quarkus.log.category.\"trash_maker\".level", "WARN"));
+        return m;
     }
 
     @Override

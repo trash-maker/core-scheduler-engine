@@ -1,4 +1,4 @@
-package trash_maker.infra;
+package trash_maker.core;
 
 import io.smallrye.config.ConfigMapping;
 import io.smallrye.config.WithDefault;
@@ -12,9 +12,20 @@ import java.util.Set;
 @ConfigMapping(prefix = "notifications")
 public interface NotificationsConfig {
 
-    /** Roles of this instance: ingest, timers, relay, results, api (+ fake-actuator for local demos). */
-    @WithDefault("ingest,timers,relay,results,api")
-    Set<String> roles();
+    /**
+     * Roles of this instance. Each role is a Quarkus profile (QUARKUS_PROFILE=timers,relay); the default prod, dev and
+     * test profiles enable every role except fake-actuator. See application.properties.
+     */
+    Role role();
+
+    interface Role {
+        @WithDefault("false") boolean ingest();
+        @WithDefault("false") boolean timers();
+        @WithDefault("false") boolean relay();
+        @WithDefault("false") boolean results();
+        @WithDefault("false") boolean api();
+        @WithName("fake-actuator") @WithDefault("false") boolean fakeActuator();
+    }
 
     Topics topics();
 
@@ -36,7 +47,6 @@ public interface NotificationsConfig {
 
     Consumers results();
 
-    Kafka kafka();
 
     @WithName("fake-actuator")
     FakeActuator fakeActuator();
@@ -50,14 +60,6 @@ public interface NotificationsConfig {
         @WithDefault("2") int consumers();
     }
 
-    interface Kafka {
-        Producer producer();
-
-        interface Producer {
-            /** Extra producer properties, comma separated k=v (e.g. security settings). */
-            @WithDefault(" ") String extra();
-        }
-    }
 
     interface FakeActuator {
         @WithDefault("*") Set<String> actions();
@@ -117,5 +119,4 @@ public interface NotificationsConfig {
         @WithName("tenant-role-prefix") @WithDefault("tenant:") String tenantRolePrefix();
     }
 
-    default boolean hasRole(String r) { return roles().contains(r); }
 }

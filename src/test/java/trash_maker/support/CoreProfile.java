@@ -16,7 +16,8 @@ public class CoreProfile implements QuarkusTestProfile {
 
     @Override
     public Map<String, String> getConfigOverrides() {
-        return Map.of("notifications.roles", "api", "quarkus.scheduler.enabled", "false");
+        return Map.of("notifications.role.ingest", "false", "notifications.role.timers", "false", "notifications.role.relay", "false",
+                "notifications.role.results", "false", "notifications.role.api", "true", "quarkus.scheduler.enabled", "false");
     }
 
     @Override

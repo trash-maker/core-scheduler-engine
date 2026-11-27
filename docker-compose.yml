@@ -63,7 +63,7 @@ services:
       DB_USER: notif
       DB_PASSWORD: notif
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      NOTIFICATIONS_ROLES: ingest,timers,relay,results,api
+      # default (prod) profile: every role; a subset would be e.g. QUARKUS_PROFILE: timers,relay
       # local demo only: no OIDC provider in the stack
       NOTIFICATIONS_API_AUTH_ENABLED: "false"
       API_AUTH_POLICY: permit
@@ -85,7 +85,7 @@ services:
       DB_USER: notif
       DB_PASSWORD: notif
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      NOTIFICATIONS_ROLES: fake-actuator
+      QUARKUS_PROFILE: fake-actuator
       NOTIFICATIONS_FAKE_ACTUATOR_FAILURE_RATE: "0.3"
       NOTIFICATIONS_API_AUTH_ENABLED: "false"
       API_AUTH_POLICY: permit

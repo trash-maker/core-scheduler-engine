@@ -22,11 +22,11 @@ public class Maintenance {
     private static final int DELETE_BATCH = 5000;
 
     private final Db db;
-    private final EngineConfig cfg;
+    private final NotificationsConfig cfg;
     private final Clock clock;
 
     @Inject
-    public Maintenance(Db db, EngineConfig cfg, Clock clock) {
+    public Maintenance(Db db, NotificationsConfig cfg, Clock clock) {
         this.db = db;
         this.cfg = cfg;
         this.clock = clock;
@@ -49,15 +49,15 @@ public class Maintenance {
 
     public RetentionReport retention() {
         Instant now = clock.instant();
-        Instant cutoff = now.minus(cfg.retention());
+        Instant cutoff = now.minus(cfg.retention().terminal());
         int notifs = deleteLoop("""
                 DELETE FROM notification WHERE (id, created_at) IN (
                   SELECT id, created_at FROM notification WHERE terminal_at IS NOT NULL AND terminal_at < ? LIMIT %d)""".formatted(DELETE_BATCH), cutoff);
         List<String> dropped = dropOldPartitions(cutoff);
         int dedup = deleteLoop("DELETE FROM notification_dedup WHERE idempotency_key IN (SELECT idempotency_key FROM notification_dedup WHERE created_at < ? LIMIT %d)".formatted(DELETE_BATCH),
-                now.minus(cfg.dedupRetention()));
+                now.minus(cfg.retention().dedup()));
         int inbox = deleteLoop("DELETE FROM signal_inbox WHERE (tenant_id, signal_id) IN (SELECT tenant_id, signal_id FROM signal_inbox WHERE received_at < ? LIMIT %d)".formatted(DELETE_BATCH),
-                now.minus(cfg.inboxRetention()));
+                now.minus(cfg.retention().inbox()));
         int dl = deleteLoop("DELETE FROM dead_letter WHERE id IN (SELECT id FROM dead_letter WHERE created_at < ? LIMIT %d)".formatted(DELETE_BATCH), cutoff);
         int series = deleteLoop("DELETE FROM recurring_series WHERE id IN (SELECT id FROM recurring_series WHERE status = 'CLOSED' AND updated_at < ? LIMIT %d)".formatted(DELETE_BATCH), cutoff);
         deleteLoop("DELETE FROM timer_dead WHERE id IN (SELECT id FROM timer_dead WHERE died_at < ? LIMIT %d)".formatted(DELETE_BATCH), cutoff);

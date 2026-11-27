@@ -9,8 +9,6 @@ import org.jboss.logging.Logger;
 import trash_maker.common.Json;
 import trash_maker.core.Jdbc.Uuid7;
 import trash_maker.core.NotificationRepository.NotificationRow;
-import trash_maker.core.Ports.EngineMetrics;
-import trash_maker.core.Ports.TraceContext;
 import trash_maker.core.SeriesRepository.SeriesRow;
 import trash_maker.domain.body.BodyResolver.BodyContext;
 import trash_maker.domain.body.BodyResolver.BodySchemaValidator;
@@ -59,16 +57,15 @@ public class NotificationEngine {
     private final Outbox outbox;
     private final Outbox dlq;
     private final StateMachine sm;
-    private final EngineConfig cfg;
-    private final EngineMetrics metrics;
-    private final TraceContext trace;
+    private final NotificationsConfig cfg;
+    private final Metrics metrics;
     private final BodySchemaValidator schemas;
     private final Db db;
     private final Clock clock;
 
     @Inject
     public NotificationEngine(NotificationRepository notifs, SeriesRepository series, TimerRepository timers, Outbox outbox,
-                              Outbox dlq, StateMachine sm, EngineConfig cfg, EngineMetrics metrics, TraceContext trace,
+                              Outbox dlq, StateMachine sm, NotificationsConfig cfg, Metrics metrics,
                               BodySchemaValidator schemas, Db db, Clock clock) {
         this.db = db;
         this.clock = clock;
@@ -80,7 +77,6 @@ public class NotificationEngine {
         this.sm = sm;
         this.cfg = cfg;
         this.metrics = metrics;
-        this.trace = trace;
         this.schemas = schemas;
     }
 
@@ -238,7 +234,7 @@ public class NotificationEngine {
                     }
                     case Effect.Emit em -> {
                         var msg = Outbox.message(row, em.attempt(), now);
-                        messages.add(new Outbox.NewMessage(cfg.outputTopic(), msg.key(), msg.headers(trace.currentHeaders()), msg.payload(),
+                        messages.add(new Outbox.NewMessage(cfg.topics().out(), msg.key(), msg.headers(outbox.traceHeaders()), msg.payload(),
                                 row.tenantId(), row.id(), em.attempt(), em.attemptTimeout() == null ? null : em.attemptTimeout().toMillis()));
                         if (em.attempt() > 1) metrics.count("notifications.retries", "action", row.action());
                     }

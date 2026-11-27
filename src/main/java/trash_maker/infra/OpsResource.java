@@ -1,5 +1,7 @@
 package trash_maker.infra;
 
+import io.quarkus.security.PermissionsAllowed;
+import io.quarkus.security.identity.SecurityIdentity;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DefaultValue;
@@ -15,7 +17,6 @@ import org.eclipse.microprofile.openapi.annotations.tags.Tag;
 import trash_maker.core.Engine;
 import trash_maker.core.Maintenance;
 import trash_maker.core.TimerRepository.TimerRow;
-import trash_maker.infra.ApiSupport.TenantGuard;
 
 import java.util.List;
 import java.util.Map;
@@ -26,14 +27,14 @@ import java.util.Map;
 @Consumes(MediaType.APPLICATION_JSON)
 @Tag(name = "ops")
 @SecurityRequirement(name = "jwt")
+@PermissionsAllowed("admin")
 public class OpsResource {
     @Inject Engine engine;
-    @Inject TenantGuard guard;
+    @Inject SecurityIdentity identity;
 
     @GET
     @Path("/stats")
     public Maintenance.QueueStats stats() {
-        guard.admin();
         return engine.maintenance.stats();
     }
 
@@ -41,7 +42,6 @@ public class OpsResource {
     @Path("/timers/dead")
     public List<TimerRow> dead(@QueryParam("tenant") String tenant, @QueryParam("after") @DefaultValue("0") long after,
                                @QueryParam("limit") @DefaultValue("100") int limit) {
-        guard.admin();
         return engine.db.read(c -> engine.timerRepository.listDead(c, tenant, after, Math.min(limit, 1000)));
     }
 
@@ -51,21 +51,18 @@ public class OpsResource {
     @Path("/timers/dead/requeue")
     @Operation(summary = "Move dead timers back to the queue (due now, failures reset)")
     public Map<String, Integer> requeue(Ids ids) {
-        guard.admin();
         return Map.of("requeued", engine.notifications.requeueDeadTimers(ids.ids()));
     }
 
     @POST
     @Path("/retention/run")
     public Maintenance.RetentionReport retention() {
-        guard.admin();
         return engine.maintenance.retention();
     }
 
     @POST
     @Path("/partitions/ensure")
     public Map<String, Integer> partitions(@QueryParam("monthsAhead") @DefaultValue("3") int months) {
-        guard.admin();
         return Map.of("created", engine.maintenance.ensurePartitions(months));
     }
 }

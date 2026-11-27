@@ -1,5 +1,6 @@
 package trash_maker.infra;
 
+import trash_maker.core.NotificationsConfig;
 import io.agroal.api.AgroalDataSource;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;

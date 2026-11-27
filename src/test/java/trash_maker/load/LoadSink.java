@@ -3,10 +3,11 @@ package trash_maker.load;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.inject.Alternative;
 import jakarta.inject.Singleton;
-import org.eclipse.microprofile.config.ConfigProvider;
 import trash_maker.common.Json;
 import trash_maker.core.Ports.MessagePublisher;
-import trash_maker.infra.EngineProducer.KafkaMessagePublisher;
+import trash_maker.infra.KafkaPublisher;
+import jakarta.enterprise.inject.Instance;
+import jakarta.inject.Inject;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -23,10 +24,11 @@ public class LoadSink implements MessagePublisher {
     final AtomicLong count = new AtomicLong();
     private MessagePublisher delegate;
 
+    @Inject Instance<KafkaPublisher> kafka;
+
     @PostConstruct
     void init() {
-        if (LoadProfile.KAFKA)
-            delegate = new KafkaMessagePublisher(ConfigProvider.getConfig().getValue("kafka.bootstrap.servers", String.class), Map.of());
+        if (LoadProfile.KAFKA) delegate = kafka.get();
     }
 
     void reset() { publishLag.clear(); count.set(0); }

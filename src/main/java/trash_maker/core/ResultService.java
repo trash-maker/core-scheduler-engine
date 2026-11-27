@@ -1,12 +1,12 @@
 package trash_maker.core;
 
+import io.opentelemetry.instrumentation.annotations.WithSpan;
 import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 import jakarta.transaction.Transactional;
 import org.jboss.logging.Logger;
 import org.jboss.logging.MDC;
 import trash_maker.core.NotificationRepository.NotificationRow;
-import trash_maker.core.Ports.EngineMetrics;
 import trash_maker.domain.notification.Lifecycle.Event;
 import trash_maker.domain.notification.Lifecycle.OutcomeMessage;
 import trash_maker.domain.notification.Lifecycle.OutcomeType;
@@ -32,11 +32,11 @@ public class ResultService {
     private final Db db;
     private final NotificationEngine engine;
     private final Outbox dlq;
-    private final EngineMetrics metrics;
+    private final Metrics metrics;
     private final Clock clock;
 
     @Inject
-    public ResultService(Db db, NotificationEngine engine, Outbox dlq, EngineMetrics metrics, Clock clock) {
+    public ResultService(Db db, NotificationEngine engine, Outbox dlq, Metrics metrics, Clock clock) {
         this.db = db;
         this.engine = engine;
         this.dlq = dlq;
@@ -59,6 +59,7 @@ public class ResultService {
     public record Stats(int received, int invalid, int applied, int ignored) {}
 
     @Transactional
+    @WithSpan("apply outcomes")
     public Stats process(List<String> payloads) {
         List<Outcome> valid = new ArrayList<>();
         List<String[]> invalid = new ArrayList<>();

@@ -2,11 +2,12 @@ package trash_maker.core;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.opentelemetry.api.OpenTelemetry;
+import io.opentelemetry.context.Context;
 import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 import trash_maker.common.Json;
 import trash_maker.core.NotificationRepository.NotificationRow;
-import trash_maker.core.Ports.EngineMetrics;
 import trash_maker.domain.notification.Lifecycle.NotificationMessage;
 
 import java.sql.Connection;
@@ -26,13 +27,23 @@ import java.util.UUID;
  */
 @Singleton
 public class Outbox {
-    private final EngineConfig cfg;
-    private final EngineMetrics metrics;
+    private final NotificationsConfig cfg;
+    private final Metrics metrics;
+
+    private final OpenTelemetry otel;
 
     @Inject
-    public Outbox(EngineConfig cfg, EngineMetrics metrics) {
+    public Outbox(NotificationsConfig cfg, Metrics metrics, OpenTelemetry otel) {
         this.cfg = cfg;
         this.metrics = metrics;
+        this.otel = otel;
+    }
+
+    /** W3C trace context of the current span, stored with the row so the message continues the trace. */
+    public Map<String, String> traceHeaders() {
+        Map<String, String> h = new java.util.HashMap<>();
+        otel.getPropagators().getTextMapPropagator().inject(Context.current(), h, (carrier, k, v) -> carrier.put(k, v));
+        return h;
     }
 
     /** The notifications.out contract for one attempt of a stored notification. */
@@ -139,7 +150,7 @@ public class Outbox {
         if (detail != null) m.put("detail", detail);
         if (payload != null) m.put("payload", payload);
         m.put("at", now.toString());
-        insert(c, cfg.dlqTopic(), tenant == null ? "unknown" : tenant, Map.of("reason", code, "source", source),
+        insert(c, cfg.topics().dlq(), tenant == null ? "unknown" : tenant, Map.of("reason", code, "source", source),
                 Json.write(m), tenant == null ? "unknown" : tenant, null, null, null, now);
         metrics.count("dlq.events", "source", source, "reason", code);
     }

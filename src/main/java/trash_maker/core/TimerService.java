@@ -7,7 +7,6 @@ import org.jboss.logging.Logger;
 import org.jboss.logging.MDC;
 import trash_maker.common.Json;
 import trash_maker.core.NotificationRepository.NotificationRow;
-import trash_maker.core.Ports.EngineMetrics;
 import trash_maker.core.Ports.TimerWakeup;
 import trash_maker.core.TimerRepository.TimerRow;
 import trash_maker.domain.notification.Lifecycle.Event;
@@ -53,14 +52,14 @@ public class TimerService {
     private final EvaluationService evaluation;
     private final SignalStore signals;
     private final RuleRegistry registry;
-    private final EngineConfig cfg;
-    private final EngineMetrics metrics;
+    private final NotificationsConfig cfg;
+    private final Metrics metrics;
     private final Clock clock;
     private volatile FaultInjector faults = t -> {};
 
     @Inject
     public TimerService(Db db, TimerRepository timers, NotificationEngine engine, EvaluationService evaluation, SignalStore signals,
-                        RuleRegistry registry, EngineConfig cfg, EngineMetrics metrics, Clock clock) {
+                        RuleRegistry registry, NotificationsConfig cfg, Metrics metrics, Clock clock) {
         this.db = db;
         this.timers = timers;
         this.engine = engine;
@@ -79,7 +78,7 @@ public class TimerService {
     public int runOnce() {
         return db.with(c -> {
             Instant now = clock.instant();
-            List<TimerRow> batch = timers.claim(c, now, cfg.timerBatchSize());
+            List<TimerRow> batch = timers.claim(c, now, cfg.timers().batchSize());
             // consistent lock order across workers (deadlock avoidance)
             batch.sort(Comparator.comparing(TimerService::lockKey));
             for (TimerRow t : batch)
@@ -115,7 +114,7 @@ public class TimerService {
         } catch (RuntimeException | SQLException e) {
             String err = e.getClass().getSimpleName() + ": " + e.getMessage();
             metrics.count("timers.failed", "kind", t.kind().name());
-            switch (TimerFailurePolicy.decide(t.failures(), cfg.timerMaxFailures(), cfg.timerFailureBackoff(), now)) {
+            switch (TimerFailurePolicy.decide(t.failures(), cfg.timers().maxFailures(), cfg.timers().failureBackoff(), now)) {
                 case TimerFailurePolicy.Dead d -> {
                     LOG.errorf("timer %d (%s) moved to timer_dead after %d failures: %s", t.id(), t.kind(), d.failures(), err);
                     timers.dead(c, t, err, now);
@@ -211,9 +210,9 @@ public class TimerService {
         String cursor = t.payload() == null || t.payload().path("cursor").isNull() ? null : t.payload().path("cursor").asText(null);
         Instant at = t.payload() != null && t.payload().hasNonNull("at") ? Instant.parse(t.payload().get("at").asText()) : t.dueAt();
         Set<String> sigs = rule.referencedSignals();
-        List<String> page = sigs.isEmpty() ? List.of() : signals.entitiesPage(c, rule.tenantId(), sigs, cursor, cfg.sweepPageSize());
+        List<String> page = sigs.isEmpty() ? List.of() : signals.entitiesPage(c, rule.tenantId(), sigs, cursor, cfg.timers().sweepPageSize());
         if (!page.isEmpty()) evaluateEntities(c, rule, page, now);
-        switch (SweepStep.after(page, cfg.sweepPageSize(), at, now, rule::nextRuleChange)) {
+        switch (SweepStep.after(page, cfg.timers().sweepPageSize(), at, now, rule::nextRuleChange)) {
             case SweepStep.Continue k -> timers.upsertSweep(c, rule.tenantId(), rule.id(), now,
                     Json.object().put("cursor", k.cursor()).put("at", k.sweepInstant().toString()));
             case SweepStep.Schedule sc -> timers.upsertSweep(c, rule.tenantId(), rule.id(), sc.at(), Json.object().put("at", sc.at().toString()));
@@ -229,14 +228,14 @@ public class TimerService {
         private static final Logger LOG = Logger.getLogger(TimerWorker.class);
 
         private final TimerService service;
-        private final EngineConfig cfg;
+        private final NotificationsConfig cfg;
         private final Clock clock;
         private final ReentrantLock lock = new ReentrantLock();
         private final Condition wake = lock.newCondition();
         private volatile boolean running = true;
         private volatile boolean signalled;
 
-        public TimerWorker(TimerService service, EngineConfig cfg, Clock clock) {
+        public TimerWorker(TimerService service, NotificationsConfig cfg, Clock clock) {
             this.service = service;
             this.cfg = cfg;
             this.clock = clock;
@@ -244,7 +243,7 @@ public class TimerService {
 
         @Override
         public void hint(Instant dueAt) {
-            if (dueAt.isAfter(clock.instant().plus(cfg.idleMax()))) return;
+            if (dueAt.isAfter(clock.instant().plus(cfg.timers().idleMax()))) return;
             lock.lock();
             try { signalled = true; wake.signalAll(); } finally { lock.unlock(); }
         }
@@ -261,10 +260,10 @@ public class TimerService {
                 try {
                     int n = service.runOnce();
                     errorBackoff = 100;
-                    if (n >= cfg.timerBatchSize()) continue;
+                    if (n >= cfg.timers().batchSize()) continue;
                     Instant next = service.nextDue();
-                    long waitMs = next == null ? cfg.idleMax().toMillis() : Duration.between(clock.instant(), next).toMillis();
-                    waitMs = Math.max(cfg.idleMin().toMillis(), Math.min(cfg.idleMax().toMillis(), waitMs));
+                    long waitMs = next == null ? cfg.timers().idleMax().toMillis() : Duration.between(clock.instant(), next).toMillis();
+                    waitMs = Math.max(cfg.timers().idleMin().toMillis(), Math.min(cfg.timers().idleMax().toMillis(), waitMs));
                     if (next != null && !next.isAfter(clock.instant())) waitMs = 0;
                     await(waitMs);
                 } catch (RuntimeException e) {

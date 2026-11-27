@@ -1,11 +1,11 @@
 package trash_maker.core;
 
+import io.opentelemetry.instrumentation.annotations.WithSpan;
 import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 import jakarta.transaction.Transactional;
 import org.jboss.logging.Logger;
 import trash_maker.common.Json;
-import trash_maker.core.Ports.EngineMetrics;
 import trash_maker.domain.rule.Rule.CompiledRule;
 import trash_maker.domain.signal.Signals.SignalBatch;
 import trash_maker.domain.signal.Signals.SignalEnvelope;
@@ -37,13 +37,13 @@ public class SignalIngestService {
     private final EvaluationService evaluation;
     private final NotificationEngine engine;
     private final Outbox dlq;
-    private final EngineConfig cfg;
-    private final EngineMetrics metrics;
+    private final NotificationsConfig cfg;
+    private final Metrics metrics;
     private final Clock clock;
 
     @Inject
     public SignalIngestService(Db db, SignalStore store, RuleRegistry registry, EvaluationService evaluation, NotificationEngine engine,
-                               Outbox dlq, EngineConfig cfg, EngineMetrics metrics, Clock clock) {
+                               Outbox dlq, NotificationsConfig cfg, Metrics metrics, Clock clock) {
         this.db = db;
         this.store = store;
         this.registry = registry;
@@ -60,6 +60,7 @@ public class SignalIngestService {
     private record Parsed(SignalEnvelope env, String raw) {}
 
     @Transactional
+    @WithSpan("ingest signals")
     public Stats ingest(List<String> payloads) {
         List<Parsed> valid = new ArrayList<>();
         List<String[]> invalid = new ArrayList<>();
@@ -77,7 +78,7 @@ public class SignalIngestService {
             for (String[] inv : invalid) dlq.record(c, "signals.in", null, "INVALID_MESSAGE", inv[1], inv[0], now);
             Set<String> fresh = store.insertInbox(c, valid.stream().map(Parsed::env).toList(), now);
             var sel = SignalBatch.select(valid.stream().map(p -> new SignalBatch.Item<>(p.env(), p)).toList(), fresh,
-                    (tenant, signal) -> registry.tenant(tenant).isReferenced(signal), cfg.storeUnreferencedSignals());
+                    (tenant, signal) -> registry.tenant(tenant).isReferenced(signal), cfg.signals().storeUnreferenced());
             List<Parsed> accepted = sel.accepted().stream().map(SignalBatch.Item::raw).toList();
             int dups = sel.duplicates(), unref = sel.unreferenced();
             if (dups > 0) metrics.count("signals.duplicate", dups);

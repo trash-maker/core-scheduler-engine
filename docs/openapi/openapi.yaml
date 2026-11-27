@@ -406,7 +406,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/JsonNode"
+                $ref: "#/components/schemas/DryRunResponse"
         "400":
           description: Bad Request
       security:
@@ -690,6 +690,16 @@ paths:
       summary: Cancel Series
 components:
   schemas:
+    Decision:
+      type: object
+      properties:
+        fire:
+          type: boolean
+        reason:
+          type: string
+        edgeSeq:
+          type: integer
+          format: int64
     DryRunRequest:
       type: object
       properties:
@@ -707,6 +717,33 @@ components:
           $ref: "#/components/schemas/JsonNode"
         priorState:
           $ref: "#/components/schemas/PriorState"
+    DryRunResponse:
+      type: object
+      properties:
+        result:
+          type: boolean
+        truth:
+          type: string
+        nodes:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/NodeResult"
+        nextEntityChange:
+          $ref: "#/components/schemas/Instant"
+        nextRuleChange:
+          $ref: "#/components/schemas/Instant"
+        decision:
+          $ref: "#/components/schemas/Decision"
+        planningError:
+          $ref: "#/components/schemas/PlanningError"
+        notifications:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlannedNotification"
+        series:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlannedSeries"
     Failure:
       type: object
       properties:
@@ -817,6 +854,13 @@ components:
       - OBJECT
       - POJO
       - STRING
+    NodeResult:
+      type: object
+      properties:
+        value:
+          type: string
+        detail:
+          type: string
     NotificationDto:
       type: object
       properties:
@@ -911,6 +955,58 @@ components:
           items:
             $ref: "#/components/schemas/RuleDto"
         nextCursor:
+          type: string
+    PlannedNotification:
+      type: object
+      properties:
+        templateId:
+          type: string
+        type:
+          type: string
+        action:
+          type: string
+        initialStatus:
+          type: string
+        parentTemplateId:
+          type: string
+        parentTrigger:
+          type: string
+        dueAt:
+          $ref: "#/components/schemas/Instant"
+        expiresAt:
+          $ref: "#/components/schemas/Instant"
+        idempotencyKey:
+          type: string
+        bodyDeferredUntilActivation:
+          type: boolean
+        body:
+          $ref: "#/components/schemas/JsonNode"
+        retryPolicy:
+          $ref: "#/components/schemas/JsonNode"
+    PlannedSeries:
+      type: object
+      properties:
+        templateId:
+          type: string
+        action:
+          type: string
+        waitingOnParent:
+          type: boolean
+        firstDueAt:
+          $ref: "#/components/schemas/Instant"
+        untilAt:
+          $ref: "#/components/schemas/Instant"
+        maxOccurrences:
+          type: integer
+          format: int32
+    PlanningError:
+      type: object
+      properties:
+        templateId:
+          type: string
+        code:
+          type: string
+        message:
           type: string
     PriorState:
       type: object

@@ -1,11 +1,11 @@
 package trash_maker.core;
 
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 import jakarta.transaction.Transactional;
 import org.jboss.logging.Logger;
 import trash_maker.common.Json;
-import trash_maker.core.Ports.EngineMetrics;
 import trash_maker.core.Ports.MessagePublisher;
 import trash_maker.domain.notification.Lifecycle.TimerKind;
 
@@ -30,14 +30,15 @@ public class OutboxRelay {
     private final Outbox outbox;
     private final TimerRepository timers;
     private final NotificationRepository notifs;
-    private final MessagePublisher publisher;
-    private final EngineConfig cfg;
-    private final EngineMetrics metrics;
+    /** Resolved on first use: the broker channel exists only on instances with the relay role. */
+    private final Instance<MessagePublisher> publisher;
+    private final NotificationsConfig cfg;
+    private final Metrics metrics;
     private final Clock clock;
 
     @Inject
-    public OutboxRelay(Db db, Outbox outbox, TimerRepository timers, NotificationRepository notifs, MessagePublisher publisher,
-                       EngineConfig cfg, EngineMetrics metrics, Clock clock) {
+    public OutboxRelay(Db db, Outbox outbox, TimerRepository timers, NotificationRepository notifs, Instance<MessagePublisher> publisher,
+                       NotificationsConfig cfg, Metrics metrics, Clock clock) {
         this.db = db;
         this.outbox = outbox;
         this.timers = timers;
@@ -53,10 +54,10 @@ public class OutboxRelay {
     @Transactional
     public Result relayOnce() {
         return db.with(c -> {
-            List<Outbox.OutboxRow> rows = outbox.claim(c, cfg.relayBatchSize());
+            List<Outbox.OutboxRow> rows = outbox.claim(c, cfg.relay().batchSize());
             if (rows.isEmpty()) return new Result(0, 0, 0);
             List<CompletableFuture<Void>> futures = new ArrayList<>(rows.size());
-            for (var r : rows) futures.add(publisher.publish(r.topic(), r.key(), r.headers(), r.payload()));
+            for (var r : rows) futures.add(publisher.get().publish(r.topic(), r.key(), r.headers(), r.payload()));
             List<Long> acked = new ArrayList<>();
             List<Outbox.OutboxRow> ackedRows = new ArrayList<>();
             int failed = 0;

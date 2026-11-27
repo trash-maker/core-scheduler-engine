@@ -8,7 +8,7 @@ import java.time.Clock;
 /** Facade over the engine's CDI beans (used by adapters and tests). */
 @Singleton
 public class Engine {
-    @Inject public EngineConfig config;
+    @Inject public NotificationsConfig config;
     @Inject public Clock clock;
     @Inject public Db db;
     @Inject public RuleRegistry registry;

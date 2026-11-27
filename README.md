@@ -54,15 +54,18 @@ docker compose --profile tracing up -d # optional Jaeger; then set OTEL_SDK_DISA
 ```
 
 The compose stack runs with **API auth disabled** (`NOTIFICATIONS_API_AUTH_ENABLED=false`, `API_AUTH_POLICY=permit`)
-because it has no OIDC provider. In every other environment, configure `OIDC_AUTH_SERVER_URL`.
+because it has no OIDC provider: the anonymous caller is then turned into a local administrator (`ApiSupport.LocalIdentity`),
+so the same declarative permissions apply. In every other environment, configure `OIDC_AUTH_SERVER_URL`.
 
 ---
 
 ## Architecture
 
-One deployable; **roles by config** (`notifications.roles=ingest,timers,relay,results,api`). Any instance can run any
-subset. Each Kafka channel is enabled only on instances with the matching role (`RolesConfigSourceFactory`), so a
-`timers,relay` instance never joins the signal consumer group. Instances are stateless. All coordination goes through
+One deployable; **roles are Quarkus profiles**: `ingest`, `timers`, `relay`, `results`, `api` (+ `fake-actuator` for demos).
+The default `prod` profile (and `dev`, `test`) runs every role; `QUARKUS_PROFILE=timers,relay` runs only those two.
+Each role is a boolean (`notifications.role.<name>`), and each Kafka channel is switched by it with a property
+expression (`mp.messaging.incoming.signals-in.enabled=${notifications.role.ingest}`), so a `timers,relay` instance never
+joins the signal consumer group. Instances are stateless. All coordination goes through
 PostgreSQL (row locks, `FOR UPDATE SKIP LOCKED`) and Kafka (keys and partitions).
 
 ```mermaid
@@ -102,8 +105,8 @@ flowchart LR
 | Layer | Package | Contents |
 |---|---|---|
 | Domain (pure functions: no framework, no I/O, no clock/random access, no mutable static state) | `domain.*`, `common.*` | expression compiler/evaluator + text DSL, cron/period recurrence, rule parser/validator, **state machine**, dependency matrix, body resolver, firing planner (shared by real processing and dry-run) |
-| Core (Quarkus CDI beans, JTA transactions, plain JDBC) | `core.*` | repositories (set-based SQL), transactional services (signal ingestion, timers, outbox relay, results, rules, operator commands, maintenance) that load state, call the pure domain functions and persist their effects. No Kafka, JPA, Micrometer or OpenTelemetry: those sit behind ports |
-| Adapters (Quarkus) | `infra.*` | SmallRye Kafka consumers, idempotent Kafka producer, REST resources, CDI producers, scheduled jobs, Micrometer/OTel adapters, health |
+| Core (Quarkus CDI beans, JTA transactions, plain JDBC) | `core.*` | repositories (set-based SQL), transactional services (signal ingestion, timers, outbox relay, results, rules, operator commands, maintenance) that load state, call the pure domain functions and persist their effects. Metrics (`Metrics`, Micrometer) and tracing (OpenTelemetry, `@WithSpan`) are used directly; no Kafka or JPA: the broker sits behind the `MessagePublisher` port |
+| Adapters (Quarkus) | `infra.*` | SmallRye Kafka consumers with fault-tolerance retries, `KafkaPublisher` on a SmallRye `Emitter`, REST resources with declarative permissions, scheduled jobs, health |
 
 **Signal path, one transaction per Kafka batch.**
 1. Bulk inbox insert (`ON CONFLICT DO NOTHING`) for idempotency on `signal_id`.
@@ -135,7 +138,8 @@ Transactions are managed by Quarkus (Narayana JTA). Agroal enlists the JDBC conn
 * **After-commit hooks** (waking local timer workers, refreshing the rule registry) are registered with the JTA
   `TransactionSynchronizationRegistry`, so a rollback drops them.
 * **Failures.**
-  * A runtime exception or `Error` rolls the whole transaction back. The worker loops and the Kafka consumers retry.
+  * A runtime exception or `Error` rolls the whole transaction back. The worker loops retry; the Kafka consumers retry
+    with SmallRye Fault Tolerance (`@Retry` + `@ExponentialBackoff`, outside the transaction, so every attempt is a new one).
   * Deadlocks (`40P01`) are retried the same way.
   * A simulated kill mid-batch is covered by `crashMidBatchLosesNothing`.
 
@@ -166,7 +170,7 @@ only loads state, calls these functions and persists the effects they return.
 * no clock or random access (time and randomness are passed in as parameters);
 * no mutable static state.
 
-It also enforces that `core` uses neither Kafka, JPA, Micrometer nor OpenTelemetry.
+It also enforces that `core` uses neither Kafka, JPA nor the messaging API.
 
 ### Test strategy
 
@@ -204,15 +208,16 @@ It also enforces that `core` uses neither Kafka, JPA, Micrometer nor OpenTelemet
         │   ├── evaluation/    RuleEvaluation (single pipeline + FiringDecision), FiringPlanner (+ FrozenContext)
         │   └── scheduling/    SchedulingPolicies (SeriesStep, TimerFailurePolicy, SweepStep, RetentionPolicy)
         ├── core/          one package: CDI services, JTA transactions, JDBC
-        │                  Engine (facade), EngineConfig, Ports (+ WakeupHub), Db, Jdbc (+ Uuid7), SchemaValidators,
+        │                  Engine (facade), NotificationsConfig (@ConfigMapping), Metrics, Ports (+ WakeupHub), Db,
+        │                  Jdbc (+ Uuid7), SchemaValidators,
         │                  SignalIngestService, SignalStore, EvaluationService (+ dry-run), RuleStateRepository,
         │                  NotificationEngine (+ operator commands), NotificationRepository, SeriesRepository,
         │                  TimerService (+ Worker loop), TimerRepository, Outbox (+ dead letters), OutboxRelay,
         │                  ResultService, RuleService, RuleRegistry, RuleRepository, Maintenance
         └── infra/         one package: Quarkus adapters
-                           EngineProducer (+ Kafka producer, Micrometer and OpenTelemetry adapters), NotificationsConfig,
-                           RolesConfigSourceFactory, KafkaConsumers, FakeActuator, RuleResource, NotificationResource,
-                           OpsResource, ApiSupport (tenant guard, role filter, error mapping), Dtos, Workers (+ health), Jobs
+                           EngineProducer, KafkaPublisher (Emitter), KafkaConsumers (@Retry), FakeActuator, RuleResource,
+                           NotificationResource, OpsResource, ApiSupport (permission checkers, local identity, role filter,
+                           error mapping), Dtos (incl. dry-run records), Workers (+ health), Jobs
 src/test/java/trash_maker/
     domain/  plain JUnit on the pure functions (truth tables, recurrence/DST, state machine, backoff, body, rule validation,
              dependency matrix, signal batch, series step, timer policy, sweep, messages, retention, pipeline, architecture)
@@ -465,7 +470,7 @@ All keys can be set via environment variables (`NOTIFICATIONS_TIMERS_WORKERS=4`,
 
 | key | default | meaning |
 |---|---|---|
-| `notifications.roles` | `ingest,timers,relay,results,api` | roles of this instance (`fake-actuator` for demos) |
+| `QUARKUS_PROFILE` / `notifications.role.<ingest\|timers\|relay\|results\|api\|fake-actuator>` | `prod` = all roles but fake-actuator | roles of this instance: a list of role profiles (e.g. `timers,relay`), or explicit booleans |
 | `notifications.topics.signals/results/out/dlq` | `signals.in` / `notification.results` / `notifications.out` / `notifications.dlq` | topic names (never in rules) |
 | `notifications.signals.store-unreferenced-signals` | `false` | keep signals no rule references (otherwise discarded + `signals.unreferenced` metric) |
 | `notifications.signals.default-max-age` | – | global staleness (leaf `maxAge` overrides) |
@@ -479,7 +484,7 @@ All keys can be set via environment variables (`NOTIFICATIONS_TIMERS_WORKERS=4`,
 | `notifications.rules.refresh-interval` | `2s` | hot reload poll |
 | `notifications.retention.terminal-notifications` / `dedup` / `inbox` / `partitions-ahead` / `interval` | `P30D` / `P7D` / `P7D` / `3` / `1h` | retention |
 | `notifications.api.auth-enabled` / `admin-role` / `tenant-role-prefix` | `true` / `admin` / `tenant:` | API authorization (roles from the JWT claim `OIDC_ROLE_CLAIM`, default `groups`) |
-| `notifications.kafka.producer.extra` | – | extra producer props `k=v,k=v` (e.g. SASL) |
+| `mp.messaging.outgoing.relay-out.*` | idempotent, `acks=all`, lz4 | outbox relay producer (any Kafka producer property, e.g. SASL) |
 | `notifications.fake-actuator.*` | `actions=*`, `failure-rate=0.1`, `permanent-failure-rate=0.02`, `silent-rate=0.02` | demo actuator |
 | env `DB_URL`, `DB_USER`, `DB_PASSWORD`, `DB_POOL_MAX`, `KAFKA_BOOTSTRAP_SERVERS`, `OIDC_AUTH_SERVER_URL`, `API_AUTH_POLICY`, `LOG_JSON`, `OTEL_SDK_DISABLED`, `OTEL_EXPORTER_OTLP_ENDPOINT` | | infrastructure |
 
@@ -488,7 +493,9 @@ All keys can be set via environment variables (`NOTIFICATIONS_TIMERS_WORKERS=4`,
 ## REST API
 
 OpenAPI: `docs/openapi/openapi.yaml`, generated at build. It is also served live at `/q/openapi`, with Swagger UI at
-`/q/swagger-ui`. Every endpoint is tenant-scoped. The caller needs the `admin` role or `tenant:<id>`; otherwise `403`.
+`/q/swagger-ui`. Access is declarative: tenant endpoints carry `@PermissionsAllowed("tenant")` and the ops endpoints
+`@PermissionsAllowed("admin")`; `ApiSupport.Permissions` (`@PermissionChecker`) grants "tenant" to roles `admin` or
+`tenant:<id>` for the `{tenant}` path parameter, otherwise `403` (`401` without a token).
 
 | method & path | purpose |
 |---|---|
@@ -518,8 +525,9 @@ OpenAPI: `docs/openapi/openapi.yaml`, generated at build. It is also served live
   * Rules and evaluation: `evaluation_time_ms`, `rules_fired_total`, `rules_fire_failed_total{reason}`.
   * DLQ and results: `dlq_events_total{source,reason}`, `dlq_last24h`, `results_outcome_total{outcome,action}`,
     `results_action_mismatch_total`.
-* **Tracing.** OpenTelemetry covers REST and Kafka. The W3C trace context is captured when a message is written to the
-  outbox and sent as Kafka headers on `notifications.out`. Enable it with `OTEL_SDK_DISABLED=false`.
+* **Tracing.** OpenTelemetry covers REST and Kafka, plus `@WithSpan` on signal ingestion and outcome processing. The W3C
+  trace context is captured when a message is written to the outbox and sent as Kafka headers on `notifications.out`
+  (connector tracing is off on the relay channel, so the stored context is kept). Enable it with `OTEL_SDK_DISABLED=false`.
 * **Health.**
   * `/q/health/live`: the engine workers are alive.
   * `/q/health/ready`: the datasource and Kafka channels are ready.
@@ -618,6 +626,6 @@ The sustained rate leaves about 9× headroom before the drain limit. Precision s
 * **Time-based NOW rules sweep every entity** that has one of the rule's signals, at each boundary of a time window.
   This is fine for hundreds of thousands of entities per rule. Beyond that, partition the sweep or narrow the entity
   set.
-* **Retries in place.** The signal and results consumers retry transient DB failures in place, which preserves
-  partition order. A permanently failing DB stops consumption until it recovers, and readiness reflects this.
+* **Retries in place.** The signal and results consumers retry transient DB failures in place (fault tolerance, no
+  maximum), which preserves partition order. A permanently failing DB stops consumption until it recovers, and readiness reflects this.
 * **Not multi-region**, and there is no windowed history over signals (out of scope).

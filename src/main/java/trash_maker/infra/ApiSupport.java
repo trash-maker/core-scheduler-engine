@@ -1,9 +1,14 @@
 package trash_maker.infra;
 
-import io.quarkus.security.ForbiddenException;
-import io.quarkus.security.UnauthorizedException;
+import trash_maker.core.NotificationsConfig;
+import io.quarkus.security.PermissionChecker;
+import io.quarkus.security.identity.AuthenticationRequestContext;
+import io.quarkus.security.identity.SecurityIdentityAugmentor;
+import io.quarkus.security.runtime.QuarkusPrincipal;
+import io.quarkus.security.runtime.QuarkusSecurityIdentity;
+import io.smallrye.mutiny.Uni;
 import io.quarkus.security.identity.SecurityIdentity;
-import jakarta.enterprise.context.RequestScoped;
+import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.Response;
@@ -15,33 +20,53 @@ import trash_maker.common.Validation.ValidationException;
 import trash_maker.core.Engine.CoreExceptions;
 import trash_maker.domain.notification.Lifecycle.IllegalTransitionException;
 
-import java.util.Arrays;
 import java.util.List;
 
-/** API cross-cutting concerns: tenant guard, role filter and error mapping. */
+/** API cross-cutting concerns: access rules, role filter and error mapping. */
 public final class ApiSupport {
     private ApiSupport() {}
 
-    /** Tenant isolation for every API call: caller needs role admin or tenant:&lt;id&gt; (from the JWT groups claim). */
-    @RequestScoped
-    public static class TenantGuard {
-        @Inject SecurityIdentity identity;
+    /**
+     * Declarative access rules used with {@code @PermissionsAllowed}: "tenant" needs role admin or tenant:&lt;id&gt;
+     * (JWT groups claim) for the endpoint's {@code tenant} path parameter; "admin" needs the admin role.
+     * With notifications.api.auth-enabled=false (local stack only) everything is allowed.
+     */
+    @ApplicationScoped
+    public static class Permissions {
         @Inject NotificationsConfig cfg;
 
-        public void check(String tenant) {
-            if (!cfg.api().authEnabled()) return;
-            if (identity == null || identity.isAnonymous()) throw new UnauthorizedException();
-            if (identity.hasRole(cfg.api().adminRole()) || identity.hasRole(cfg.api().tenantRolePrefix() + tenant)) return;
-            throw new ForbiddenException("no access to tenant " + tenant);
+        @PermissionChecker("tenant")
+        boolean tenant(SecurityIdentity identity, String tenant) {
+            if (!cfg.api().authEnabled()) return true;
+            return !identity.isAnonymous()
+                    && (identity.hasRole(cfg.api().adminRole()) || identity.hasRole(cfg.api().tenantRolePrefix() + tenant));
         }
 
-        public void admin() {
-            if (!cfg.api().authEnabled()) return;
-            if (identity == null || identity.isAnonymous()) throw new UnauthorizedException();
-            if (!identity.hasRole(cfg.api().adminRole())) throw new ForbiddenException("admin role required");
+        @PermissionChecker("admin")
+        boolean admin(SecurityIdentity identity) {
+            return !cfg.api().authEnabled() || (!identity.isAnonymous() && identity.hasRole(cfg.api().adminRole()));
         }
+    }
 
-        public String principal() { return identity == null || identity.isAnonymous() ? "anonymous" : identity.getPrincipal().getName(); }
+    /**
+     * Local stack only (notifications.api.auth-enabled=false): the anonymous caller becomes the local administrator,
+     * so the same declarative permissions apply without an OIDC provider.
+     */
+    @ApplicationScoped
+    public static class LocalIdentity implements SecurityIdentityAugmentor {
+        @Inject NotificationsConfig cfg;
+
+        @Override
+        public Uni<SecurityIdentity> augment(SecurityIdentity identity, AuthenticationRequestContext context) {
+            if (cfg.api().authEnabled() || !identity.isAnonymous()) return Uni.createFrom().item(identity);
+            return Uni.createFrom().item(QuarkusSecurityIdentity.builder(identity).setAnonymous(false)
+                    .setPrincipal(new QuarkusPrincipal("local")).addRole(cfg.api().adminRole()).build());
+        }
+    }
+
+    /** Name recorded as author of rule versions and operator actions. */
+    public static String principal(SecurityIdentity identity) {
+        return identity == null || identity.isAnonymous() ? "anonymous" : identity.getPrincipal().getName();
     }
 
     /** Instances without the 'api' role do not serve the REST API (health and metrics stay available under /q). */
@@ -51,8 +76,7 @@ public final class ApiSupport {
         @ServerRequestFilter(preMatching = true)
         public Response filter(ContainerRequestContext ctx) {
             if (apiEnabled == null) {
-                String roles = ConfigProvider.getConfig().getOptionalValue("notifications.roles", String.class).orElse("api");
-                apiEnabled = Arrays.stream(roles.split(",")).map(String::trim).anyMatch("api"::equals);
+                apiEnabled = ConfigProvider.getConfig().getOptionalValue("notifications.role.api", Boolean.class).orElse(false);
             }
             if (!apiEnabled && ctx.getUriInfo().getPath().startsWith("/api/")) return Response.status(404).build();
             return null;

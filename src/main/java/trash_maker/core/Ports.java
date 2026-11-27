@@ -6,7 +6,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 
-/** Ports implemented by the adapters (broker, metrics, tracing) and the local timer wake-up hub. */
+/** Ports: the message broker (Kafka in production, doubles in tests) and the local timer wake-up hub. */
 public final class Ports {
     private Ports() {}
 
@@ -15,24 +15,7 @@ public final class Ports {
         CompletableFuture<Void> publish(String topic, String key, Map<String, String> headers, String payload);
     }
 
-    /** Port for metrics; tags must have bounded cardinality (action, kind, outcome, reason codes). */
-    public interface EngineMetrics {
-        EngineMetrics NOOP = new EngineMetrics() {};
 
-        default void count(String name, String... tags) { count(name, 1, tags); }
-
-        default void count(String name, long n, String... tags) {}
-
-        /** Records a duration/lag in milliseconds into a histogram. */
-        default void recordMs(String name, long millis, String... tags) {}
-    }
-
-    /** Port for trace propagation: headers of the current span (e.g. traceparent) to store in the outbox. */
-    public interface TraceContext {
-        TraceContext NONE = Map::of;
-
-        Map<String, String> currentHeaders();
-    }
 
     /** Notified after commit when a timer due soon was written, so local workers do not wait for the next poll. */
     public interface TimerWakeup {

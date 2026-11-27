@@ -1,8 +1,8 @@
 package trash_maker.infra;
 
+import trash_maker.core.NotificationsConfig;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
-import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
@@ -31,10 +31,10 @@ public class Workers {
     private final List<Thread> threads = new ArrayList<>();
     private volatile boolean relayRunning = true;
 
-    void start(@Observes @Priority(10) StartupEvent ev) {
+    void start(@Observes StartupEvent ev) {
         engine.maintenance.ensurePartitions(cfg.retention().partitionsAhead());
         engine.registry.refresh();
-        if (cfg.hasRole("timers")) {
+        if (cfg.role().timers()) {
             engine.rules.ensureSweeps();
             for (int i = 0; i < cfg.timers().workers(); i++) {
                 TimerWorker w = new TimerWorker(engine.timers, engine.config, engine.clock);
@@ -43,12 +43,12 @@ public class Workers {
                 threads.add(Thread.ofVirtual().name("timer-worker-" + i).start(w));
             }
         }
-        if (cfg.hasRole("relay")) {
+        if (cfg.role().relay()) {
             for (int i = 0; i < cfg.relay().workers(); i++) threads.add(Thread.ofVirtual().name("outbox-relay-" + i).start(this::relayLoop));
         }
         var c = org.eclipse.microprofile.config.ConfigProvider.getConfig();
         LOG.infof("notification engine started: roles=%s timerWorkers=%d channels: signals-in=%s results-in=%s fake-actuator-in=%s",
-                cfg.roles(), timerWorkers.size(),
+                roles(), timerWorkers.size(),
                 c.getOptionalValue("mp.messaging.incoming.signals-in.enabled", String.class).orElse("?"),
                 c.getOptionalValue("mp.messaging.incoming.results-in.enabled", String.class).orElse("?"),
                 c.getOptionalValue("mp.messaging.incoming.fake-actuator-in.enabled", String.class).orElse("?"));
@@ -79,6 +79,12 @@ public class Workers {
             try { t.join(10_000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
         }
         LOG.info("notification engine workers stopped");
+    }
+
+    private String roles() {
+        var r = cfg.role();
+        return String.join(",", java.util.stream.Stream.of(r.ingest() ? "ingest" : null, r.timers() ? "timers" : null, r.relay() ? "relay" : null,
+                r.results() ? "results" : null, r.api() ? "api" : null, r.fakeActuator() ? "fake-actuator" : null).filter(x -> x != null).toList());
     }
 
     public boolean alive() { return threads.stream().allMatch(Thread::isAlive); }

@@ -3,7 +3,6 @@ package trash_maker.core;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
-import trash_maker.core.Ports.EngineMetrics;
 import trash_maker.domain.body.BodyResolver.BodySchemaValidator;
 import trash_maker.domain.evaluation.RuleEvaluation;
 import trash_maker.domain.expr.Expr.LeafMemory;
@@ -28,13 +27,13 @@ public class EvaluationService {
     private final NotificationEngine engine;
     private final TimerRepository timers;
     private final Outbox dlq;
-    private final EngineConfig cfg;
-    private final EngineMetrics metrics;
+    private final NotificationsConfig cfg;
+    private final Metrics metrics;
     private final BodySchemaValidator schemas;
 
     @Inject
     public EvaluationService(RuleStateRepository states, NotificationEngine engine, TimerRepository timers, Outbox dlq,
-                             EngineConfig cfg, EngineMetrics metrics, BodySchemaValidator schemas) {
+                             NotificationsConfig cfg, Metrics metrics, BodySchemaValidator schemas) {
         this.states = states;
         this.engine = engine;
         this.timers = timers;
@@ -78,7 +77,7 @@ public class EvaluationService {
             long t0 = System.nanoTime();
             RuleEvaluation.Result res = RuleEvaluation.run(rule, w.tenantId(), w.correlationKey(), w.signals(), w.trigger(), now,
                     new RuleEvaluation.PriorState(st.lastResult(), st.edgeSeq(), st.lastFiredAt(), st.memory()),
-                    cfg.defaultSignalMaxAge(), schemas);
+                    cfg.signals().defaultMaxAge().orElse(null), schemas);
             metrics.recordMs("evaluation.time", (System.nanoTime() - t0) / 1_000_000);
             boolean fire = res.decision().fire();
             RuleEvaluation.PriorState next = res.nextState(new RuleEvaluation.PriorState(st.lastResult(), st.edgeSeq(), st.lastFiredAt(), st.memory()), now);
@@ -117,7 +116,7 @@ public class EvaluationService {
                                         Instant now, boolean lastResult, long edgeSeq, Instant lastFiredAt, Map<String, LeafMemory> memory) {
         return RuleEvaluation.run(rule, rule.tenantId(), correlationKey, signals, trigger, now,
                 new RuleEvaluation.PriorState(lastResult, edgeSeq, lastFiredAt, memory == null ? Map.of() : memory),
-                cfg.defaultSignalMaxAge(), schemas);
+                cfg.signals().defaultMaxAge().orElse(null), schemas);
     }
 
     public int evaluate(Connection c, EntityWork w, Map<RuleStateRepository.Key, RuleStateRepository.State> locked, Instant now) throws SQLException {
